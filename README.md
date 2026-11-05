@@ -62,11 +62,21 @@ out/0715-main/*.jpg（可选 ZIP）
 
 ## 安装
 
+从 npm 安装（推荐）：
+
+```text
+plugin_manager install_bundle, target = dsh-psd-batch-studio
+```
+
+固定版本用 `dsh-psd-batch-studio@0.2.4`。
+
+也可以从 GitHub 安装：
+
 ```text
 plugin_manager install_bundle, target = github:vinkwork/dsh-psd-batch-studio
 ```
 
-需要固定版本可用 `#v0.1.1`。如果插件管理器不支持 GitHub spec，克隆后指向本地目录：
+如果插件管理器不支持 GitHub spec，克隆后指向本地目录：
 
 ```bash
 git clone https://github.com/vinkwork/dsh-psd-batch-studio.git

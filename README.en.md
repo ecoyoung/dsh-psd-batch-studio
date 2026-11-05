@@ -87,13 +87,19 @@ out/0715-main/*.jpg  (+ optional ZIP)
 
 ## Install
 
+### From npm (recommended)
+
+```text
+plugin_manager install_bundle, target = dsh-psd-batch-studio
+```
+
+Pin a version with `dsh-psd-batch-studio@0.2.4` if you need a stable snapshot.
+
 ### From the repository
 
 ```text
 plugin_manager install_bundle, target = github:vinkwork/dsh-psd-batch-studio
 ```
-
-Pin a release with `#v0.1.1` if you need a stable snapshot.
 
 If the plugin manager cannot resolve a GitHub spec, clone and install the local
 directory instead:
