@@ -8,8 +8,8 @@
 
 同一套合成内核还提供两个 agent 工具，可以让 agent 在 Host 侧无人值守地跑完整个 SKU 目录。
 
-> **协议：** 源码可见、非商用（PolyForm Noncommercial 1.0.0）。
-> 个人/非商业使用免费；商业使用需要单独授权。详见 [LICENSE](LICENSE) 与 [LICENSING.md](LICENSING.md)。
+> **协议：** 修改版 Apache License 2.0 + 附加条件（参考 Dify 模式）。
+> 允许商用；多租户服务或去除品牌标识需要书面授权。详见 [LICENSE](LICENSE) 与 [LICENSING.md](LICENSING.md)。
 > English README: [README.md](README.md)。
 
 ## 适用对象
@@ -140,7 +140,13 @@ npm run build
 - 源码：<https://github.com/vinkwork/dsh-psd-batch-studio>
 
 Copyright (c) 2026 上海缙嘉科技有限公司（Genca）。
-代码以 **PolyForm Noncommercial License 1.0.0** 发布：个人及其他非商业用途可免费使用、修改、
-并按相同条款非商业分发；商业使用需要上海缙嘉科技有限公司（Genca）的单独书面授权。详见
-[LICENSE](LICENSE) 与 [LICENSING.md](LICENSING.md)。第三方 MIT 声明见
+
+代码以 **修改版 Apache License 2.0** 发布，附加条件参考 Dify 的结构：
+
+- 允许商用，包括企业内部使用、作为其他应用的后端或企业应用开发平台；
+- 运营多租户服务，或去除/修改前端 LOGO 与版权信息，需要上海缙嘉科技有限公司（Genca）的书面商业授权；
+- 贡献者同意：官方可以调整协议（更严或更松），贡献代码可被用于商业用途。
+
+完整条款见 [LICENSE](LICENSE)，未修改的 Apache 2.0 原文见 [LICENSE-APACHE](LICENSE-APACHE)。
+v0.1.2 及更早版本仍按 PolyForm Noncommercial 1.0.0 发布，适用其原始条款。第三方 MIT 声明见
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。

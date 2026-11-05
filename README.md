@@ -10,10 +10,10 @@ batch of SKU cut-outs, fine-tune on a canvas, and export every image.
 The same compositor also powers two agent tools, so the agent can inspect a
 template and render a whole SKU folder headlessly.
 
-> **License:** source-available, noncommercial (PolyForm Noncommercial 1.0.0).
-> Personal use is free; commercial use needs a separate license. See
-> [LICENSE](LICENSE) and [LICENSING.md](LICENSING.md).
-> 中文说明见 [README.zh-CN.md](README.zh-CN.md).
+> **License:** modified Apache License 2.0 with additional conditions (Dify-style).
+> Commercial use is allowed; operating a multi-tenant service or removing the
+> branding requires a written license. See [LICENSE](LICENSE) and
+> [LICENSING.md](LICENSING.md). 中文说明见 [README.zh-CN.md](README.zh-CN.md).
 
 ## Who it is for
 
@@ -208,11 +208,19 @@ server.js      built Host artifact
 
 Copyright (c) 2026 上海缙嘉科技有限公司 (Genca). Open-sourced by the VinkWork team.
 
-The source is released under the **PolyForm Noncommercial License 1.0.0**. It
-permits personal and other noncommercial use, modification, and noncommercial
-redistribution under the same terms. Commercial use requires a separate written
-license from 上海缙嘉科技有限公司 (Genca).
+Released under a **modified Apache License 2.0** with additional conditions,
+following the same structure as Dify's license:
 
-See [LICENSE](LICENSE) and [LICENSING.md](LICENSING.md) for the exact terms and
-commercial licensing contact. Third-party MIT notices are in
+- commercial use is permitted, including internal enterprise use and use as a
+  backend or application platform;
+- a commercial license from 上海缙嘉科技有限公司 (Genca) is required to operate a
+  multi-tenant service, or to remove/modify the logo or copyright information in
+  the frontend;
+- contributors agree that the producer may adjust the license and use
+  contributions commercially.
+
+The full terms are in [LICENSE](LICENSE); the unmodified Apache 2.0 text is in
+[LICENSE-APACHE](LICENSE-APACHE). Versions up to v0.1.2 were released under the
+PolyForm Noncommercial License 1.0.0; those releases remain under their original
+terms. Third-party MIT notices are in
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
