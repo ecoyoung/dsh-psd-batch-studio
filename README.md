@@ -214,8 +214,8 @@ following the same structure as Dify's license:
 - commercial use is permitted, including internal enterprise use and use as a
   backend or application platform;
 - a commercial license from 上海缙嘉科技有限公司 (Genca) is required to operate a
-  multi-tenant service, or to remove/modify the logo or copyright information in
-  the frontend;
+  multi-tenant service, or to remove/modify the copyright, project name, or
+  attribution in the frontend;
 - contributors agree that the producer may adjust the license and use
   contributions commercially.
 

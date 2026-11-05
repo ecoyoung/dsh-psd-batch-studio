@@ -8,7 +8,8 @@ License 2.0**, following the same structure as Dify's license: commercial use is
 allowed, with additional conditions for multi-tenant services and branding.
 
 The exact terms are in [LICENSE](LICENSE); the unmodified Apache License 2.0 text
-is in [LICENSE-APACHE](LICENSE-APACHE).
+is in [LICENSE-APACHE](LICENSE-APACHE). The branding condition protects the
+project name and attribution, not a graphical logo.
 
 ## What is allowed for free
 
@@ -28,9 +29,10 @@ required to:
    customer organizations or workspaces from one deployment, unless explicitly
    authorized in writing. One tenant corresponds to one customer organization or
    workspace.
-2. **Remove or modify the logo or copyright information** in the plugin's
-   frontend (the UI under `src/client/`, the built `client.js`, `icon.svg`, and
-   the display strings under `locale/`).
+2. **Remove or modify the copyright notices, the project name, or the
+   attribution to Genca / VinkWork** in the plugin's frontend, source files,
+   README, or package metadata. No graphical logo is required for this
+   condition to apply.
 
 For commercial licensing, open an issue at
 <https://github.com/vinkwork/dsh-psd-batch-studio/issues> or contact the

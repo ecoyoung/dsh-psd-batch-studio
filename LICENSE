@@ -15,10 +15,11 @@ License 2.0**, with the following additional conditions:
         organization or workspace. A workspace provides a separated area for
         each tenant's data and configurations.
 
-   b. **LOGO and copyright information**: In the process of using the plugin's
-      frontend, you may not remove or modify the LOGO or copyright information
-      in the console or applications. This restriction is inapplicable to uses
-      that do not involve the frontend.
+   b. **Copyright and attribution notices**: You may not remove or modify the
+      copyright notices, the project name "PSD Batch Studio", or the attribution
+      to Genca / VinkWork in the plugin's frontend, source files, README, or
+      package metadata. This condition applies whether or not the project ships
+      a graphical logo.
 
       - **Frontend definition**: for this project, the frontend includes the UI
         components under `src/client/`, the built `client.js`, `icon.svg`, and
