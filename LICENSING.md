@@ -4,8 +4,8 @@ Copyright (c) 2026 上海缙嘉科技有限公司 (Genca). Open-sourced by the V
 team. VinkWork's core product is [VinkClaw.com](https://vinkclaw.com).
 
 `dsh-psd-batch-studio` is released under a **modified version of the Apache
-License 2.0**, following the same structure as Dify's license: commercial use is
-allowed, with additional conditions for multi-tenant services and branding.
+License 2.0**, with additional conditions for multi-tenant services and
+attribution: commercial use is allowed, subject to those conditions.
 
 The exact terms are in [LICENSE](LICENSE); the unmodified Apache License 2.0 text
 is in [LICENSE-APACHE](LICENSE-APACHE). The branding condition protects the
@@ -47,8 +47,8 @@ By contributing code, you agree that:
 2. Your contributed code may be used for commercial purposes, including but not
    limited to cloud business operations.
 
-This mirrors the contributor terms used by Dify and keeps the project able to
-offer both the community and commercial editions.
+These contributor terms keep the project able to offer both the community and
+commercial editions.
 
 ## Version history
 

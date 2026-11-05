@@ -10,7 +10,7 @@ batch of SKU cut-outs, fine-tune on a canvas, and export every image.
 The same compositor also powers two agent tools, so the agent can inspect a
 template and render a whole SKU folder headlessly.
 
-> **License:** modified Apache License 2.0 with additional conditions (Dify-style).
+> **License:** modified Apache License 2.0 with additional conditions.
 > Commercial use is allowed; operating a multi-tenant service or removing the
 > branding requires a written license. See [LICENSE](LICENSE) and
 > [LICENSING.md](LICENSING.md). 中文说明见 [README.zh-CN.md](README.zh-CN.md).
@@ -208,8 +208,7 @@ server.js      built Host artifact
 
 Copyright (c) 2026 上海缙嘉科技有限公司 (Genca). Open-sourced by the VinkWork team.
 
-Released under a **modified Apache License 2.0** with additional conditions,
-following the same structure as Dify's license:
+Released under a **modified Apache License 2.0** with additional conditions:
 
 - commercial use is permitted, including internal enterprise use and use as a
   backend or application platform;

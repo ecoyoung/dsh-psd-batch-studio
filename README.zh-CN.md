@@ -8,7 +8,7 @@
 
 同一套合成内核还提供两个 agent 工具，可以让 agent 在 Host 侧无人值守地跑完整个 SKU 目录。
 
-> **协议：** 修改版 Apache License 2.0 + 附加条件（参考 Dify 模式）。
+> **协议：** 修改版 Apache License 2.0，带附加条件。
 > 允许商用；多租户服务或去除品牌标识需要书面授权。详见 [LICENSE](LICENSE) 与 [LICENSING.md](LICENSING.md)。
 > English README: [README.md](README.md)。
 
@@ -141,7 +141,7 @@ npm run build
 
 Copyright (c) 2026 上海缙嘉科技有限公司（Genca）。
 
-代码以 **修改版 Apache License 2.0** 发布，附加条件参考 Dify 的结构：
+代码以 **修改版 Apache License 2.0** 发布，附加条件如下：
 
 - 允许商用，包括企业内部使用、作为其他应用的后端或企业应用开发平台；
 - 运营多租户服务，或去除/修改前端版权信息、项目名称、Genca/VinkWork 署名，需要上海缙嘉科技有限公司（Genca）的书面商业授权；

@@ -1,6 +1,6 @@
 {
   "name": "dsh-psd-batch-studio",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "DeepSeek Harness plugin for batch-producing e-commerce main images from PSD templates: product slots, SKU cut-out fitting, canvas fine-tune, and agent tools.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
