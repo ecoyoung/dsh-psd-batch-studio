@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Main Image Batch Studio",
-    "description": "Open a PSD main-image template, mark the product slots, drop in a batch of SKU cut-outs, fine-tune placement on the canvas, and export every main image at once."
+    "description": "Open-sourced by the VinkWork team at Shanghai Jinjia Technology Co., Ltd. Open a PSD main-image template, mark product slots, drop in SKU cut-outs, fine-tune on canvas, and export every main image at once."
   }
 }

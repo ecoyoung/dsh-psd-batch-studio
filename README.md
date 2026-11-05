@@ -1,5 +1,7 @@
 # DSH PSD Batch Studio
 
+> Open-sourced by the **VinkWork team** at **Shanghai Jinjia Technology Co., Ltd.** (上海缙嘉科技有限公司).
+
 A [DeepSeek Harness](https://github.com/deepseek-ai) plugin for producing e-commerce
 main images at scale: load a PSD/PSB template, mark the product slots, drop in a
 batch of SKU cut-outs, fine-tune on a canvas, and export every image.
@@ -10,6 +12,45 @@ template and render a whole SKU folder headlessly.
 > **License:** source-available, noncommercial (PolyForm Noncommercial 1.0.0).
 > Personal use is free; commercial use needs a separate license. See
 > [LICENSE](LICENSE) and [LICENSING.md](LICENSING.md).
+> 中文说明见 [README.zh-CN.md](README.zh-CN.md).
+
+## Who it is for
+
+E-commerce design and operations teams that already build main images as PSD
+templates — and need to produce many variants without repeating the same
+Photoshop steps. The PSD stays the source of truth; the studio only replaces the
+product pixels, keeps every decoration layer in place, and exports the result.
+
+It is **not** a Photoshop replacement: it does not edit text, retouch photos, or
+manage a DAM. It takes a template plus cut-outs and turns them into finished
+main-image variants.
+
+## Use cases
+
+- **Campaign batches** — one template × hundreds of SKUs for 618, Double 11, Black
+  Friday, or a store-wide sale; or one SKU set × several campaign templates. Switch
+  the template and keep the SKU queue.
+- **New product launches** — one template, many color / size / pack variants;
+  re-fit each SKU in the same slots without opening Photoshop.
+- **Multi-platform and multi-size sets** — square, portrait, or long-image
+  templates for Tmall, JD, Douyin, Pinduoduo, or an internal catalog; switch
+  templates without rebuilding the workflow.
+- **Design-to-operations handoff** — designers publish the approved PSD and slot
+  rules; operations, agencies, or store managers run the batch themselves.
+- **Agent-driven production** — `psd_batch_render` runs unattended batches in the
+  workspace for nightly jobs, catalog integrations, or “produce these 200 images
+  before tomorrow” requests.
+- **Template governance** — keep copy, badges, price bars, and campaign props on
+  separate layers, then toggle them per campaign while the product slot stays
+  stable.
+
+A typical run:
+
+```text
+templates/summer-main.psd + skus/0715/*.png
+        ↓  product-slot replacement
+out/0715-main/*.jpg  (+ optional ZIP)
+```
 
 ## Features
 
@@ -48,6 +89,8 @@ template and render a whole SKU folder headlessly.
 ```text
 plugin_manager install_bundle, target = github:vinkwork/dsh-psd-batch-studio
 ```
+
+Pin a release with `#v0.1.1` if you need a stable snapshot.
 
 If the plugin manager cannot resolve a GitHub spec, clone and install the local
 directory instead:
@@ -153,11 +196,23 @@ server.js      built Host artifact
 - The Host tools require `@napi-rs/canvas`; if the native package cannot load on
   a platform, the browser workbench still works but the agent tools do not.
 
-## License and commercial use
+## Project
+
+- Maintained by the VinkWork team at Shanghai Jinjia Technology Co., Ltd.
+  (上海缙嘉科技有限公司).
+- Issues and feature requests: <https://github.com/vinkwork/dsh-psd-batch-studio/issues>
+- Source: <https://github.com/vinkwork/dsh-psd-batch-studio>
+
+## License
+
+Copyright (c) 2026 Shanghai Jinjia Technology Co., Ltd. (上海缙嘉科技有限公司).
+Open-sourced by the VinkWork team.
 
 The source is released under the **PolyForm Noncommercial License 1.0.0**. It
 permits personal and other noncommercial use, modification, and noncommercial
 redistribution under the same terms. Commercial use requires a separate written
-license from Vinkwork.
+license from Shanghai Jinjia Technology Co., Ltd.
 
-Third-party MIT notices are in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+See [LICENSE](LICENSE) and [LICENSING.md](LICENSING.md) for the exact terms and
+commercial licensing contact. Third-party MIT notices are in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

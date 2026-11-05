@@ -1,0 +1,144 @@
+# DSH PSD Batch Studio · 主图批量替换工作台
+
+> 由 **上海缙嘉科技有限公司 VinkWork 团队** 开源。
+
+一个 [DeepSeek Harness](https://github.com/deepseek-ai) 插件，用来批量生产电商商品主图：
+载入 PSD/PSB 主图模板，标记商品槽位，批量放入 SKU 抠图，在画布上微调，最后一键整批导出。
+
+同一套合成内核还提供两个 agent 工具，可以让 agent 在 Host 侧无人值守地跑完整个 SKU 目录。
+
+> **协议：** 源码可见、非商用（PolyForm Noncommercial 1.0.0）。
+> 个人/非商业使用免费；商业使用需要单独授权。详见 [LICENSE](LICENSE) 与 [LICENSING.md](LICENSING.md)。
+> English README: [README.md](README.md)。
+
+## 适用对象
+
+适合已经有 PSD 主图模板、又需要批量产出变体的电商设计与运营团队。PSD 仍然是唯一事实来源：
+插件只替换商品像素，保留模板里的文字、价格条、角标、赠品卡等装饰层，最后输出成品图。
+
+它**不是** Photoshop 替代品：不负责改文案、修图、管理素材库；它负责“模板 + 抠图 → 成品主图变体”。
+
+## 适用场景
+
+- **大促/活动批量出图**：一个模板 × 几百个 SKU（618、双 11、黑五、店铺全场活动），
+  或者一批 SKU × 多个活动模板；换模板时 SKU 队列保留，不用重新导入。
+- **新品上新**：一个模板，多个颜色/规格/组合装变体，在同一组商品位里重新适配。
+- **多平台/多尺寸**：天猫、京东、抖音、拼多多，或方图、竖图、长图的模板集合；
+  换模板不用重搭流程。
+- **设计到运营的交接**：设计师交付 PSD 和槽位规则，运营/代运营/店长自己批量出图，不再排队等设计。
+- **Agent 自动化**：`psd_batch_render` 在工作区里无人值守批量渲染，适合夜间任务、商品库对接、
+  “明早之前出 200 张”这类需求。
+- **模板治理**：文案、角标、价格条、活动道具分图层管理，按活动开关；商品位保持稳定。
+
+一次典型运行：
+
+```text
+templates/summer-main.psd + skus/0715/*.png
+        ↓  商品槽位替换
+out/0715-main/*.jpg（可选 ZIP）
+```
+
+## 功能
+
+- **模板工作台**：打开 `.psd` / `.psb`，浏览图层树、开关图层，在交互画布上实时看合成结果。
+- **商品槽位**：按面积、位置、长宽比和命名自动推荐商品图层；可手动标记/取消。
+  同一商品的「原层 + 阴影/高光副本」会组成一个商品簇，一起隐藏、商品只画一次。
+- **批量适配**：一次导入多张 PNG/JPG/WebP 抠图，自动裁掉透明边，按
+  完整放入 / 按高度 / 按宽度 / 铺满裁切适配，并支持对齐和占比。
+- **画布微调**：拖动商品、拖角点缩放、数值调偏移/缩放/角度，可一键同步到全部 SKU。
+- **导出**：按模板原始分辨率输出 JPG/PNG，每个 SKU 一张，可打包 ZIP。
+- **Agent 工具**：`psd_inspect`、`psd_batch_render`，同一套内核在 Host 侧批量跑。
+- **本地优先**：PSD 解析和合成都在本机完成（页面内或 Host 进程），没有网络请求、没有埋点、不上传素材。
+
+## 环境要求
+
+- DeepSeek Harness（带插件管理器）。插件声明 `dsh.engines.dsh >= 0.2.1-rc.5`，
+  已在 `0.2.1-rc.5` 和 `0.2.2-rc.1` 上验证。
+- Node.js 20+（构建和 Host 侧 agent 工具需要）。
+- 安装时需要能访问 npm registry：agent 工具依赖 `@napi-rs/canvas` 的平台预编译包。
+- 不需要安装 Photoshop。
+
+## 安装
+
+```text
+plugin_manager install_bundle, target = github:vinkwork/dsh-psd-batch-studio
+```
+
+需要固定版本可用 `#v0.1.1`。如果插件管理器不支持 GitHub spec，克隆后指向本地目录：
+
+```bash
+git clone https://github.com/vinkwork/dsh-psd-batch-studio.git
+cd dsh-psd-batch-studio
+npm install
+```
+
+```text
+plugin_manager install_bundle, target = /绝对路径/dsh-psd-batch-studio
+```
+
+安装后刷新 Harness 页面：侧边栏出现「主图批量替换」图标，agent 侧出现两个工具。
+
+`client.js` / `server.js` 已随仓库提交，安装不需要先构建；改源码后执行 `npm run build`。
+
+## 使用工作台
+
+1. 从侧边栏打开「主图批量替换」。
+2. 载入 `.psd` / `.psb`，左侧出现图层树，自动识别的商品位用虚线框标出。
+3. 在图层树确认槽位：◎ 切换商品位，眼睛图标开关该层是否参与合成；大模板可用搜索框。
+4. 导入 SKU 抠图，在右侧选择一张即可在画布所有槽位预览。
+5. 调适配方式、对齐、占比、偏移、缩放、角度；「同步到全部」把当前微调套到所有 SKU。
+6. 选 JPG/PNG，整批导出，可顺带打 ZIP。
+
+## Agent 工具
+
+| 工具 | 作用 |
+| --- | --- |
+| `psd_inspect` | 返回模板尺寸、图层树（名称/层级/可见性/边界/图层 id）和自动识别的商品槽位。 |
+| `psd_batch_render` | 把一批 SKU 套进模板，输出 JPG/PNG（可选 ZIP）到工作区。 |
+
+调用示例：
+
+```json
+{
+  "template": "templates/summer-main.psd",
+  "skuDir": "skus/0715",
+  "outDir": "out/0715-main",
+  "format": "jpg",
+  "fit": "contain",
+  "anchor": "center",
+  "adjustments": {
+    "sku-001": { "dy": -14, "scale": 1.03 }
+  },
+  "zip": true
+}
+```
+
+两个工具的路径都相对当前会话工作目录解析，并拒绝越界路径。`psd_batch_render` 默认 JPG、质量 92，
+返回输出目录和前 50 个文件名。
+
+## 构建
+
+```bash
+npm install
+npm run build
+```
+
+## 已知限制
+
+- 文字层使用 PSD 里的栅格像素，暂不支持在工具里改文案/字体。
+- 斜面和浮雕、内阴影为近似或跳过；描边/投影/发光为近似。
+- 一次处理一个模板；「多模板 × 多 SKU」矩阵尚未内置，换模板时 SKU 队列会保留。
+- 几百 MB 的 PSB 需要几百 MB 内存；建议用桌面端或 Host 批量路径。
+- Host 工具依赖 `@napi-rs/canvas`；某个平台加载不了原生包时，页面工作台仍可用，agent 工具不可用。
+
+## 项目与协议
+
+- 维护团队：上海缙嘉科技有限公司 VinkWork 团队。
+- 问题反馈：<https://github.com/vinkwork/dsh-psd-batch-studio/issues>
+- 源码：<https://github.com/vinkwork/dsh-psd-batch-studio>
+
+Copyright (c) 2026 Shanghai Jinjia Technology Co., Ltd.（上海缙嘉科技有限公司）。
+代码以 **PolyForm Noncommercial License 1.0.0** 发布：个人及其他非商业用途可免费使用、修改、
+并按相同条款非商业分发；商业使用需要上海缙嘉科技有限公司的单独书面授权。详见
+[LICENSE](LICENSE) 与 [LICENSING.md](LICENSING.md)。第三方 MIT 声明见
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。
