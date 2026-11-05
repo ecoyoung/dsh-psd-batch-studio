@@ -1,6 +1,7 @@
 # DSH PSD Batch Studio · 主图批量替换工作台
 
-> 由 **上海缙嘉科技有限公司 VinkWork 团队** 开源。
+> 由 **Genca（缙嘉集团，上海缙嘉科技有限公司）VinkWork 团队** 开源。
+> VinkWork 的核心产品是 [VinkClaw.com](https://vinkclaw.com)。
 
 一个 [DeepSeek Harness](https://github.com/deepseek-ai) 插件，用来批量生产电商商品主图：
 载入 PSD/PSB 主图模板，标记商品槽位，批量放入 SKU 抠图，在画布上微调，最后一键整批导出。
@@ -133,12 +134,13 @@ npm run build
 
 ## 项目与协议
 
-- 维护团队：上海缙嘉科技有限公司 VinkWork 团队。
+- 维护团队：Genca（缙嘉集团，上海缙嘉科技有限公司）VinkWork 团队。
+- VinkWork 核心产品：<https://vinkclaw.com>
 - 问题反馈：<https://github.com/vinkwork/dsh-psd-batch-studio/issues>
 - 源码：<https://github.com/vinkwork/dsh-psd-batch-studio>
 
-Copyright (c) 2026 Shanghai Jinjia Technology Co., Ltd.（上海缙嘉科技有限公司）。
+Copyright (c) 2026 上海缙嘉科技有限公司（Genca）。
 代码以 **PolyForm Noncommercial License 1.0.0** 发布：个人及其他非商业用途可免费使用、修改、
-并按相同条款非商业分发；商业使用需要上海缙嘉科技有限公司的单独书面授权。详见
+并按相同条款非商业分发；商业使用需要上海缙嘉科技有限公司（Genca）的单独书面授权。详见
 [LICENSE](LICENSE) 与 [LICENSING.md](LICENSING.md)。第三方 MIT 声明见
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。

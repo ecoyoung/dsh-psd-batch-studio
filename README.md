@@ -1,6 +1,7 @@
 # DSH PSD Batch Studio
 
-> Open-sourced by the **VinkWork team** at **Shanghai Jinjia Technology Co., Ltd.** (上海缙嘉科技有限公司).
+> Open-sourced by the **VinkWork team** at **Genca** (缙嘉集团, 上海缙嘉科技有限公司).
+> VinkWork's core product is [VinkClaw.com](https://vinkclaw.com).
 
 A [DeepSeek Harness](https://github.com/deepseek-ai) plugin for producing e-commerce
 main images at scale: load a PSD/PSB template, mark the product slots, drop in a
@@ -198,20 +199,19 @@ server.js      built Host artifact
 
 ## Project
 
-- Maintained by the VinkWork team at Shanghai Jinjia Technology Co., Ltd.
-  (上海缙嘉科技有限公司).
+- Maintained by the VinkWork team at Genca (缙嘉集团, 上海缙嘉科技有限公司).
+- VinkWork's core product: <https://vinkclaw.com>
 - Issues and feature requests: <https://github.com/vinkwork/dsh-psd-batch-studio/issues>
 - Source: <https://github.com/vinkwork/dsh-psd-batch-studio>
 
 ## License
 
-Copyright (c) 2026 Shanghai Jinjia Technology Co., Ltd. (上海缙嘉科技有限公司).
-Open-sourced by the VinkWork team.
+Copyright (c) 2026 上海缙嘉科技有限公司 (Genca). Open-sourced by the VinkWork team.
 
 The source is released under the **PolyForm Noncommercial License 1.0.0**. It
 permits personal and other noncommercial use, modification, and noncommercial
 redistribution under the same terms. Commercial use requires a separate written
-license from Shanghai Jinjia Technology Co., Ltd.
+license from 上海缙嘉科技有限公司 (Genca).
 
 See [LICENSE](LICENSE) and [LICENSING.md](LICENSING.md) for the exact terms and
 commercial licensing contact. Third-party MIT notices are in
