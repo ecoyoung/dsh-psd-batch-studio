@@ -1,100 +1,72 @@
-# DSH PSD Batch Studio
+# DSH PSD Batch Studio · 主图批量替换工作台
 
-> Open-sourced by the **VinkWork team** at **Genca** (缙嘉集团, 上海缙嘉科技有限公司).
-> VinkWork's core product is [VinkClaw.com](https://vinkclaw.com).
+**简体中文 | [English](README.en.md)**
 
-A [DeepSeek Harness](https://github.com/deepseek-ai) plugin for producing e-commerce
-main images at scale: load a PSD/PSB template, mark the product slots, drop in a
-batch of SKU cut-outs, fine-tune on a canvas, and export every image.
+> 由 **Genca（缙嘉集团，上海缙嘉科技有限公司）VinkWork 团队** 开源。
+> VinkWork 的核心产品是 [VinkClaw.com](https://vinkclaw.com)。
 
-The same compositor also powers two agent tools, so the agent can inspect a
-template and render a whole SKU folder headlessly.
+一个 [DeepSeek Harness](https://github.com/deepseek-ai) 插件，用来批量生产电商商品主图：
+载入 PSD/PSB 主图模板，标记商品槽位，批量放入 SKU 抠图，在画布上微调，最后一键整批导出。
 
-> **License:** modified Apache License 2.0 with additional conditions.
-> Commercial use is allowed; operating a multi-tenant service or removing the
-> branding requires a written license. See [LICENSE](LICENSE) and
-> [LICENSING.md](LICENSING.md). 中文说明见 [README.zh-CN.md](README.zh-CN.md).
+同一套合成内核还提供两个 agent 工具，可以让 agent 在 Host 侧无人值守地跑完整个 SKU 目录。
 
-## Who it is for
+> **协议：** 修改版 Apache License 2.0，带附加条件。
+> 允许商用；多租户服务或去除品牌标识需要书面授权。详见 [LICENSE](LICENSE) 与 [LICENSING.md](LICENSING.md)。
 
-E-commerce design and operations teams that already build main images as PSD
-templates — and need to produce many variants without repeating the same
-Photoshop steps. The PSD stays the source of truth; the studio only replaces the
-product pixels, keeps every decoration layer in place, and exports the result.
+## 适用对象
 
-It is **not** a Photoshop replacement: it does not edit text, retouch photos, or
-manage a DAM. It takes a template plus cut-outs and turns them into finished
-main-image variants.
+适合已经有 PSD 主图模板、又需要批量产出变体的电商设计与运营团队。PSD 仍然是唯一事实来源：
+插件只替换商品像素，保留模板里的文字、价格条、角标、赠品卡等装饰层，最后输出成品图。
 
-## Use cases
+它**不是** Photoshop 替代品：不负责改文案、修图、管理素材库；它负责“模板 + 抠图 → 成品主图变体”。
 
-- **Campaign batches** — one template × hundreds of SKUs for 618, Double 11, Black
-  Friday, or a store-wide sale; or one SKU set × several campaign templates. Switch
-  the template and keep the SKU queue.
-- **New product launches** — one template, many color / size / pack variants;
-  re-fit each SKU in the same slots without opening Photoshop.
-- **Multi-platform and multi-size sets** — square, portrait, or long-image
-  templates for Tmall, JD, Douyin, Pinduoduo, or an internal catalog; switch
-  templates without rebuilding the workflow.
-- **Design-to-operations handoff** — designers publish the approved PSD and slot
-  rules; operations, agencies, or store managers run the batch themselves.
-- **Agent-driven production** — `psd_batch_render` runs unattended batches in the
-  workspace for nightly jobs, catalog integrations, or “produce these 200 images
-  before tomorrow” requests.
-- **Template governance** — keep copy, badges, price bars, and campaign props on
-  separate layers, then toggle them per campaign while the product slot stays
-  stable.
+## 适用场景
 
-A typical run:
+- **大促/活动批量出图**：一个模板 × 几百个 SKU（618、双 11、黑五、店铺全场活动），
+  或者一批 SKU × 多个活动模板；换模板时 SKU 队列保留，不用重新导入。
+- **新品上新**：一个模板，多个颜色/规格/组合装变体，在同一组商品位里重新适配。
+- **多平台/多尺寸**：天猫、京东、抖音、拼多多，或方图、竖图、长图的模板集合；
+  换模板不用重搭流程。
+- **设计到运营的交接**：设计师交付 PSD 和槽位规则，运营/代运营/店长自己批量出图，不再排队等设计。
+- **Agent 自动化**：`psd_batch_render` 在工作区里无人值守批量渲染，适合夜间任务、商品库对接、
+  “明早之前出 200 张”这类需求。
+- **模板治理**：文案、角标、价格条、活动道具分图层管理，按活动开关；商品位保持稳定。
+
+一次典型运行：
 
 ```text
 templates/summer-main.psd + skus/0715/*.png
-        ↓  product-slot replacement
-out/0715-main/*.jpg  (+ optional ZIP)
+        ↓  商品槽位替换
+out/0715-main/*.jpg（可选 ZIP）
 ```
 
-## Features
+## 功能
 
-- **Template workbench** — open a `.psd` / `.psb`, browse the layer tree, toggle
-  layers, and see the composite on an interactive canvas.
-- **Product slots** — auto-detects likely product layers by size, position,
-  aspect ratio, and naming; mark or unmark slots manually. Stacked copies of the
-  same product (the artwork plus a shadow/highlight copy) form one slot cluster
-  and are hidden together.
-- **Batch SKU fitting** — import many PNG/JPG/WebP cut-outs; each is trimmed to
-  its visible alpha bounds and fitted into every slot with contain / height /
-  width / cover, plus anchor and fill controls.
-- **Canvas fine-tune** — drag the product, scale with corner handles, set
-  offset/scale/rotation numerically, and copy one adjustment to the whole batch.
-- **Export** — JPG or PNG at the template resolution, one file per SKU, packed
-  into a ZIP when requested.
-- **Agent tools** — `psd_inspect` and `psd_batch_render` expose the same pipeline
-  to the agent for unattended batches.
-- **Local-first** — PSD parsing and compositing happen in the browser (or in the
-  Host process for agent batches). No network calls, no telemetry, no upload.
+- **模板工作台**：打开 `.psd` / `.psb`，浏览图层树、开关图层，在交互画布上实时看合成结果。
+- **商品槽位**：按面积、位置、长宽比和命名自动推荐商品图层；可手动标记/取消。
+  同一商品的「原层 + 阴影/高光副本」会组成一个商品簇，一起隐藏、商品只画一次。
+- **批量适配**：一次导入多张 PNG/JPG/WebP 抠图，自动裁掉透明边，按
+  完整放入 / 按高度 / 按宽度 / 铺满裁切适配，并支持对齐和占比。
+- **画布微调**：拖动商品、拖角点缩放、数值调偏移/缩放/角度，可一键同步到全部 SKU。
+- **导出**：按模板原始分辨率输出 JPG/PNG，每个 SKU 一张，可打包 ZIP。
+- **Agent 工具**：`psd_inspect`、`psd_batch_render`，同一套内核在 Host 侧批量跑。
+- **本地优先**：PSD 解析和合成都在本机完成（页面内或 Host 进程），没有网络请求、没有埋点、不上传素材。
 
-## Requirements
+## 环境要求
 
-- DeepSeek Harness with the plugin manager. The plugin declares
-  `dsh.engines.dsh >= 0.2.1-rc.5` and was tested on `0.2.1-rc.5` and
-  `0.2.2-rc.1`.
-- Node.js 20+ for building and for the agent tools.
-- npm registry access on install: the agent tools depend on `@napi-rs/canvas`,
-  which ships platform-specific prebuilt binaries.
-- No Photoshop installation is required.
+- DeepSeek Harness（带插件管理器）。插件声明 `dsh.engines.dsh >= 0.2.1-rc.5`，
+  已在 `0.2.1-rc.5` 和 `0.2.2-rc.1` 上验证。
+- Node.js 20+（构建和 Host 侧 agent 工具需要）。
+- 安装时需要能访问 npm registry：agent 工具依赖 `@napi-rs/canvas` 的平台预编译包。
+- 不需要安装 Photoshop。
 
-## Install
-
-### From the repository
+## 安装
 
 ```text
 plugin_manager install_bundle, target = github:vinkwork/dsh-psd-batch-studio
 ```
 
-Pin a release with `#v0.1.1` if you need a stable snapshot.
-
-If the plugin manager cannot resolve a GitHub spec, clone and install the local
-directory instead:
+需要固定版本可用 `#v0.1.1`。如果插件管理器不支持 GitHub spec，克隆后指向本地目录：
 
 ```bash
 git clone https://github.com/vinkwork/dsh-psd-batch-studio.git
@@ -103,43 +75,30 @@ npm install
 ```
 
 ```text
-plugin_manager install_bundle, target = /absolute/path/to/dsh-psd-batch-studio
+plugin_manager install_bundle, target = /绝对路径/dsh-psd-batch-studio
 ```
 
-After installation, refresh the Harness page. A **PSD Batch Studio** icon
-appears in the sidebar, and the agent gains the two tools below.
+安装后刷新 Harness 页面：侧边栏出现「主图批量替换」图标，agent 侧出现两个工具。
 
-### Build artifacts
+`client.js` / `server.js` 已随仓库提交，安装不需要先构建；改源码后执行 `npm run build`。
 
-`client.js` and `server.js` are committed so an install does not need a build
-step. After changing source, rebuild them:
+## 使用工作台
 
-```bash
-npm install
-npm run build
-```
+1. 从侧边栏打开「主图批量替换」。
+2. 载入 `.psd` / `.psb`，左侧出现图层树，自动识别的商品位用虚线框标出。
+3. 在图层树确认槽位：◎ 切换商品位，眼睛图标开关该层是否参与合成；大模板可用搜索框。
+4. 导入 SKU 抠图，在右侧选择一张即可在画布所有槽位预览。
+5. 调适配方式、对齐、占比、偏移、缩放、角度；「同步到全部」把当前微调套到所有 SKU。
+6. 选 JPG/PNG，整批导出，可顺带打 ZIP。
 
-## Using the workbench
+## Agent 工具
 
-1. Open the **PSD Batch Studio** panel from the sidebar.
-2. Load a `.psd` / `.psb` template. The studio lists its layers and marks the
-   detected product slots with a dashed outline.
-3. Confirm the slots in the layer tree: the target button toggles a slot, the eye
-   button toggles whether the layer is composited. Use the search box for large
-   templates.
-4. Import SKU cut-outs. Select one in the queue to preview it in every slot.
-5. Tune fit mode, anchor, fill, offset, scale, and rotation. **Apply to all**
-   copies the current adjustment to every SKU.
-6. Export the batch as JPG or PNG, with or without a ZIP.
-
-## Agent tools
-
-| Tool | Purpose |
+| 工具 | 作用 |
 | --- | --- |
-| `psd_inspect` | Template size, layer tree (name, depth, visibility, bounds, leaf id), and auto-detected slots. |
-| `psd_batch_render` | Render many SKUs into one template and write JPG/PNG files (optionally a ZIP) inside the workspace. |
+| `psd_inspect` | 返回模板尺寸、图层树（名称/层级/可见性/边界/图层 id）和自动识别的商品槽位。 |
+| `psd_batch_render` | 把一批 SKU 套进模板，输出 JPG/PNG（可选 ZIP）到工作区。 |
 
-Example request:
+调用示例：
 
 ```json
 {
@@ -156,70 +115,39 @@ Example request:
 }
 ```
 
-Both tools resolve paths relative to the session working directory and refuse
-paths outside it. `psd_batch_render` defaults to JPG at quality 92 and returns
-the output folder plus the first 50 file names.
+两个工具的路径都相对当前会话工作目录解析，并拒绝越界路径。`psd_batch_render` 默认 JPG、质量 92，
+返回输出目录和前 50 个文件名。
 
-## How it works
+## 构建
 
-- PSD/PSB parsing uses [`ag-psd`](https://github.com/Agamnentzar/ag-psd): layer
-  canvases, bounds, opacity, blend modes, masks, clipping, and layer styles.
-- The compositor maps Photoshop blend modes to Canvas 2D operations and supports
-  layer masks (luminance → alpha), clipping chains, solid and gradient overlays,
-  drop shadows, outer glows, and an approximate stroke.
-- A template is split into background runs and product slots, so a SKU image
-  lands between the layers below it and the decorations above it.
-- Slot clusters hide stacked copies of the same product and draw the SKU once.
-- The browser and the Host renderer share `src/core/`; the Host swaps the canvas
-  implementation for `@napi-rs/canvas`.
-
-```text
-src/
-  core/        canvas factory, PSD parsing/compositing, fitting, export
-  client/      Harness Client UI (React)
-  server.js    Host batch renderer + agent tools
-index.js       Host plugin entry (registers the tools)
-client.js      built browser artifact
-server.js      built Host artifact
+```bash
+npm install
+npm run build
 ```
 
-## Compatibility and limits
+## 已知限制
 
-- Text layers are used as rasterized PSD pixels; editing copy/fonts inside the
-  studio is not supported yet.
-- Bevel/emboss and inner-shadow layer styles are approximated or skipped;
-  stroke/shadow/glow are approximations. The compositor is tuned for typical
-  e-commerce main-image templates.
-- One template is processed at a time. Multi-template × multi-SKU matrices are
-  not built in; the SKU queue is kept when switching templates.
-- Very large PSB files (hundreds of MB) need hundreds of MB of memory; prefer
-  the desktop app or the Host batch path.
-- The Host tools require `@napi-rs/canvas`; if the native package cannot load on
-  a platform, the browser workbench still works but the agent tools do not.
+- 文字层使用 PSD 里的栅格像素，暂不支持在工具里改文案/字体。
+- 斜面和浮雕、内阴影为近似或跳过；描边/投影/发光为近似。
+- 一次处理一个模板；「多模板 × 多 SKU」矩阵尚未内置，换模板时 SKU 队列会保留。
+- 几百 MB 的 PSB 需要几百 MB 内存；建议用桌面端或 Host 批量路径。
+- Host 工具依赖 `@napi-rs/canvas`；某个平台加载不了原生包时，页面工作台仍可用，agent 工具不可用。
 
-## Project
+## 项目与协议
 
-- Maintained by the VinkWork team at Genca (缙嘉集团, 上海缙嘉科技有限公司).
-- VinkWork's core product: <https://vinkclaw.com>
-- Issues and feature requests: <https://github.com/vinkwork/dsh-psd-batch-studio/issues>
-- Source: <https://github.com/vinkwork/dsh-psd-batch-studio>
+- 维护团队：Genca（缙嘉集团，上海缙嘉科技有限公司）VinkWork 团队。
+- VinkWork 核心产品：<https://vinkclaw.com>
+- 问题反馈：<https://github.com/vinkwork/dsh-psd-batch-studio/issues>
+- 源码：<https://github.com/vinkwork/dsh-psd-batch-studio>
 
-## License
+Copyright (c) 2026 上海缙嘉科技有限公司（Genca）。
 
-Copyright (c) 2026 上海缙嘉科技有限公司 (Genca). Open-sourced by the VinkWork team.
+代码以 **修改版 Apache License 2.0** 发布，附加条件如下：
 
-Released under a **modified Apache License 2.0** with additional conditions:
+- 允许商用，包括企业内部使用、作为其他应用的后端或企业应用开发平台；
+- 运营多租户服务，或去除/修改前端版权信息、项目名称、Genca/VinkWork 署名，需要上海缙嘉科技有限公司（Genca）的书面商业授权；
+- 贡献者同意：官方可以调整协议（更严或更松），贡献代码可被用于商业用途。
 
-- commercial use is permitted, including internal enterprise use and use as a
-  backend or application platform;
-- a commercial license from 上海缙嘉科技有限公司 (Genca) is required to operate a
-  multi-tenant service, or to remove/modify the copyright, project name, or
-  attribution in the frontend;
-- contributors agree that the producer may adjust the license and use
-  contributions commercially.
-
-The full terms are in [LICENSE](LICENSE); the unmodified Apache 2.0 text is in
-[LICENSE-APACHE](LICENSE-APACHE). Versions up to v0.1.2 were released under the
-PolyForm Noncommercial License 1.0.0; those releases remain under their original
-terms. Third-party MIT notices are in
-[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+完整条款见 [LICENSE](LICENSE)，未修改的 Apache 2.0 原文见 [LICENSE-APACHE](LICENSE-APACHE)。
+v0.1.2 及更早版本仍按 PolyForm Noncommercial 1.0.0 发布，适用其原始条款。第三方 MIT 声明见
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。
