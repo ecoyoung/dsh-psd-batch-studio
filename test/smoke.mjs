@@ -9,11 +9,11 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { createCanvas } from '@napi-rs/canvas'
+import { createCanvas, loadImage } from '@napi-rs/canvas'
 import { writePsd } from 'ag-psd'
 
 import { parseTemplate, buildScene, suggestSlots } from '../src/core/psd.js'
-import { inspectTemplate, renderBatch } from '../src/server.js'
+import { editTemplate, inspectTemplate, renderBatch } from '../src/server.js'
 
 // Importing src/server.js installs the ag-psd/@napi-rs canvas factory.
 
@@ -74,6 +74,21 @@ function buildFixturePsd() {
             // Font-only override: the base fauxBold flag must survive.
             { length: 3, style: { font: { name: 'SourceHanSansCN-Regular' }, fontSize: 28 } },
           ],
+        },
+      },
+      // PostScript name that is not in the family map: it must be reported
+      // whole, otherwise the registered face (named after the file) misses.
+      {
+        name: '卖点',
+        left: 450,
+        top: 100,
+        right: 700,
+        bottom: 160,
+        canvas: fillCanvas(250, 60, '#333333'),
+        text: {
+          text: '买1享到手2件礼',
+          transform: [1, 0, 0, 1, 450, 100],
+          style: { font: { name: 'GlowSansSC-Normal-Medium' }, fontSize: 40 },
         },
       },
       // Non-RGB fill colors: grayscale and CMYK documents must not report as
@@ -178,6 +193,8 @@ async function main() {
   await fs.writeFile(path.join(cwd, 'zorder.psd'), Buffer.from(buildZOrderPsd()))
   await fs.writeFile(path.join(cwd, 'shadow-steal.psd'), Buffer.from(buildShadowStealPsd()))
   await fs.writeFile(path.join(cwd, 'sku.png'), await sku.encode('png'))
+  const badge = fillCanvas(40, 40, '#00ff00')
+  await fs.writeFile(path.join(cwd, 'badge.png'), await badge.encode('png'))
 
   try {
     // --- psd_inspect: text layers report copy and per-run styles ----------
@@ -291,6 +308,118 @@ async function main() {
     assert.equal(slotB.rect.y, 230)
     assert.equal(slotB.rect.w, 282)
     assert.equal(slotB.rect.h, 382)
+
+    // --- font names keep their PostScript form --------------------------
+    const selling = inspect.layers.find((layer) => layer.name === '卖点')
+    assert.ok(selling, 'PostScript-named text layer listed')
+    assert.equal(
+      selling.runs[0].family,
+      'GlowSansSC-Normal-Medium',
+      'a PostScript font name is not truncated to its family head',
+    )
+
+    // --- psd_edit: text repaint replaces the rasterised pixels -----------
+    const edit = await editTemplate({
+      cwd,
+      template: 'fixture.psd',
+      action: 'text',
+      layer: '价格',
+      text: '¥9.90',
+      runs: [
+        { len: 1 },
+        { len: 1, sizePx: 56, color: '#CC3046' },
+        { len: 4 },
+      ],
+    })
+    assert.equal(edit.value, '¥9.90')
+    assert.equal(edit.runs, 3)
+    // The fixture uses a font that is never registered here.
+    assert.match(String(edit.warning || ''), /fall back/, 'unregistered font is reported, not silent')
+
+    const repainted = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png'],
+      outDir: 'out-text',
+      format: 'png',
+    })
+    const textCanvas = createCanvas(800, 800)
+    const textCtx = textCanvas.getContext('2d')
+    textCtx.drawImage(await loadImage(path.join(cwd, 'out-text', repainted.files[0])), 0, 0)
+    const corner = textCtx.getImageData(106, 704, 1, 1).data
+    assert.ok(
+      corner[0] > 200 && corner[1] > 200 && corner[2] > 200,
+      'the old solid price raster is gone after the repaint',
+    )
+
+    // --- psd_edit: element placement above the slot ----------------------
+    await editTemplate({
+      cwd,
+      template: 'fixture.psd',
+      action: 'element',
+      paths: ['badge.png'],
+      dx: 600,
+      dy: 600,
+      aboveSlots: true,
+    })
+    const placed = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png'],
+      outDir: 'out-element',
+      format: 'png',
+    })
+    const elementCanvas = createCanvas(800, 800)
+    const elementCtx = elementCanvas.getContext('2d')
+    elementCtx.drawImage(await loadImage(path.join(cwd, 'out-element', placed.files[0])), 0, 0)
+    const green = elementCtx.getImageData(620, 620, 1, 1).data
+    assert.ok(green[1] > 240 && green[0] < 40, 'placed element renders at its offset')
+
+    // --- psd_edit: project round-trip -----------------------------------
+    await editTemplate({ cwd, template: 'fixture.psd', action: 'save_project', project: 'project.json' })
+    await editTemplate({ cwd, template: 'fixture.psd', action: 'reset' })
+    const cleared = await editTemplate({ cwd, template: 'fixture.psd', action: 'status' })
+    assert.equal(cleared.textEdits.length, 0, 'reset drops text edits')
+    assert.equal(cleared.elements.length, 0, 'reset drops elements')
+
+    const restored = await editTemplate({
+      cwd,
+      template: 'fixture.psd',
+      action: 'load_project',
+      project: 'project.json',
+    })
+    assert.equal(restored.textEdits, 1, 'project restores the text edit')
+    assert.equal(restored.elements, 1, 'project restores the placed element')
+    const after = await editTemplate({ cwd, template: 'fixture.psd', action: 'status' })
+    assert.ok(after.missingFonts.includes('Noto Sans SC'), 'missing fonts stay visible in status')
+    assert.ok(after.missingFonts.includes('GlowSansSC-Normal-Medium'), 'PostScript families are listed as needed')
+
+    // --- psd_edit: font registration (skipped when no system font) -------
+    const fontCandidates = [
+      '/System/Library/Fonts/Supplemental/Arial.ttf',
+      '/Library/Fonts/Arial.ttf',
+      '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+    ]
+    let fontSource = null
+    for (const candidate of fontCandidates) {
+      try {
+        await fs.access(candidate)
+        fontSource = candidate
+        break
+      } catch { /* try the next one */ }
+    }
+    if (fontSource) {
+      await fs.copyFile(fontSource, path.join(cwd, 'StudioSmoke.ttf'))
+      const fonts = await editTemplate({
+        cwd,
+        template: 'fixture.psd',
+        action: 'fonts',
+        paths: ['StudioSmoke.ttf'],
+      })
+      assert.ok(fonts.loaded.includes('StudioSmoke'), 'font file registered under its stem')
+      assert.ok(fonts.registered.includes('StudioSmoke'), 'registered list reports the family')
+      assert.deepEqual(fonts.failed, [], 'no font failed to register')
+    }
 
     console.log('smoke test passed')
   } finally {

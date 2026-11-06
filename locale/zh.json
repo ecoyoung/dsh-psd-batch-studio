@@ -2,5 +2,9 @@
   "meta": {
     "title": "主图批量替换工作台",
     "description": "由 Genca（上海缙嘉科技有限公司）VinkWork 团队开源。载入 PSD 主图模板，标记商品槽位，批量套入 SKU 抠图，并在画布上微调位置、缩放与角度后一键整批导出。"
-  }
+  },
+  "action.loadFonts": "导入字体",
+  "toast.fontsLoaded": "已导入 {n} 个字体",
+  "toast.notFont": "只认 ttf / otf / ttc / woff 字体文件",
+  "toast.fontsMissing": "模板要用的字体还没导入，文字会回退：{list}"
 }

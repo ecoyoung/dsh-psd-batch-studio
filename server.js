@@ -15645,7 +15645,7 @@ var require_dist = __commonJS({
 var import_ag_psd2 = __toESM(require_dist(), 1);
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createCanvas as createCanvas2, loadImage } from "@napi-rs/canvas";
+import { createCanvas as createCanvas2, loadImage, GlobalFonts } from "@napi-rs/canvas";
 
 // node_modules/fflate/esm/index.mjs
 import { createRequire } from "module";
@@ -16385,6 +16385,190 @@ function createCanvas(width, height) {
 
 // src/core/psd.js
 var import_ag_psd = __toESM(require_dist(), 1);
+
+// src/core/text.js
+var registered = /* @__PURE__ */ new Set();
+var fontFaceInstaller = null;
+function setFontFaceInstaller(installer) {
+  fontFaceInstaller = installer;
+}
+function markFontRegistered(family) {
+  const name = String(family || "").trim();
+  if (name) registered.add(name);
+}
+function registeredFonts() {
+  return [...registered].sort();
+}
+function templateFamilies(doc) {
+  const families = /* @__PURE__ */ new Set();
+  for (const entry of doc.entries || []) {
+    if (!entry.text) continue;
+    for (const run of entry.text.runs || []) {
+      if (run.family) families.add(run.family);
+    }
+  }
+  return [...families].sort();
+}
+function unregisteredFamilies(doc) {
+  return templateFamilies(doc).filter((family) => !registered.has(family));
+}
+function cssFont(style, sizePx) {
+  const weight = style.weight || 400;
+  const italic = style.italic ? "italic " : "";
+  const family = String(style.family || "PingFang SC").replace(/"/g, '\\"');
+  return `${italic}${weight} ${Math.max(1, sizePx)}px "${family}"`;
+}
+function textMetrics(entry) {
+  const bounds = entry.bounds || [0, 0, 0, 0];
+  const box = {
+    x: bounds[0],
+    y: bounds[1],
+    w: Math.max(1, bounds[2] - bounds[0]),
+    h: Math.max(1, bounds[3] - bounds[1])
+  };
+  const value = entry.text && typeof entry.text.value === "string" ? entry.text.value : "";
+  const lines = Math.max(1, value.split("\n").length);
+  const runs = entry.text && entry.text.runs || [];
+  const maxPt = Math.max(1, ...runs.map((run) => run.size || 0), 1);
+  const pxPerPt = box.h / (lines * maxPt * 1.2);
+  return { box, lines, maxPt, pxPerPt };
+}
+function styleAt(runs, index) {
+  let accumulated = 0;
+  for (const run of runs) {
+    accumulated += run.len || 0;
+    if (index < accumulated) return run;
+  }
+  return runs.length ? runs[runs.length - 1] : null;
+}
+function chunkLine(line, offset, runs, fallback) {
+  const chunks = [];
+  for (let index = 0; index < line.length; index += 1) {
+    const style = styleAt(runs, offset + index) || fallback;
+    const last = chunks[chunks.length - 1];
+    if (last && last.style === style) last.text += line[index];
+    else chunks.push({ style, text: line[index] });
+  }
+  return chunks;
+}
+function measureChunk(ctx, chunk, pxPerPt, tracking) {
+  const size = Math.max(1, (chunk.style.size || 12) * pxPerPt);
+  ctx.font = cssFont(chunk.style, size);
+  const spacing = (chunk.style.tracking || tracking || 0) * pxPerPt;
+  if (!spacing) return ctx.measureText(chunk.text).width;
+  let width = 0;
+  for (const char of chunk.text) width += ctx.measureText(char).width + spacing;
+  return width;
+}
+function drawChunk(ctx, chunk, x, baseline, pxPerPt, tracking) {
+  const size = Math.max(1, (chunk.style.size || 12) * pxPerPt);
+  ctx.font = cssFont(chunk.style, size);
+  const color = chunk.style.color || [0, 0, 0];
+  ctx.fillStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
+  const spacing = (chunk.style.tracking || tracking || 0) * pxPerPt;
+  if (!spacing) {
+    ctx.fillText(chunk.text, x, baseline);
+    return;
+  }
+  let cursor = x;
+  for (const char of chunk.text) {
+    ctx.fillText(char, cursor, baseline);
+    cursor += ctx.measureText(char).width + spacing;
+  }
+}
+var ALIGN_TO_ANCHOR = { left: "left", start: "left", center: "center", right: "right", end: "right", justify: "left" };
+function renderTextEntry(entry, options = {}) {
+  const text = entry.text || { value: "", runs: [] };
+  const runs = text.runs || [];
+  const meta = textMetrics(entry);
+  const value = String(text.value || "");
+  const lines = value.split("\n");
+  const canvas = createCanvas(Math.max(1, Math.ceil(meta.box.w)), Math.max(1, Math.ceil(meta.box.h)));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return { canvas, left: meta.box.x, top: meta.box.y };
+  const align = String(options.align || text.align || "left").toLowerCase();
+  const anchor = ALIGN_TO_ANCHOR[align] || "left";
+  const tracking = typeof options.tracking === "number" ? options.tracking : 0;
+  const lineHeight = meta.maxPt * meta.pxPerPt * (typeof text.leading === "number" && text.leading > 0 ? Math.max(1, text.leading / meta.maxPt) : 1.2);
+  const fallback = runs[0] || { size: meta.maxPt, family: "PingFang SC", weight: 400, color: [0, 0, 0] };
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "left";
+  let offset = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const chunks = chunkLine(line, offset, runs, fallback);
+    offset += line.length + 1;
+    const widths = chunks.map((chunk) => measureChunk(ctx, chunk, meta.pxPerPt, tracking));
+    const total = widths.reduce((sum, width) => sum + width, 0);
+    let cursor = anchor === "center" ? (meta.box.w - total) / 2 : anchor === "right" ? meta.box.w - total : 0;
+    const baseline = lineHeight * (index + 0.82);
+    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+      drawChunk(ctx, chunks[chunkIndex], cursor, baseline, meta.pxPerPt, tracking);
+      cursor += widths[chunkIndex];
+    }
+  }
+  return { canvas, left: meta.box.x, top: meta.box.y };
+}
+function readFontPostScriptName(buffer) {
+  try {
+    const view = new DataView(buffer.buffer ? buffer.buffer : buffer, buffer.byteOffset || 0, buffer.byteLength);
+    const tagAt = (offset) => String.fromCharCode(
+      view.getUint8(offset),
+      view.getUint8(offset + 1),
+      view.getUint8(offset + 2),
+      view.getUint8(offset + 3)
+    );
+    let nameOffset = 0;
+    if (tagAt(0) === "ttcf") {
+      const first = view.getUint32(12);
+      const count2 = view.getUint16(first + 4);
+      for (let index = 0; index < count2; index += 1) {
+        const record = first + 12 + index * 16;
+        if (tagAt(record) === "name") {
+          nameOffset = view.getUint32(record + 8);
+          break;
+        }
+      }
+    } else {
+      const count2 = view.getUint16(4);
+      for (let index = 0; index < count2; index += 1) {
+        const record = 12 + index * 16;
+        if (tagAt(record) === "name") {
+          nameOffset = view.getUint32(record + 8);
+          break;
+        }
+      }
+    }
+    if (!nameOffset) return null;
+    const count = view.getUint16(nameOffset + 2);
+    const stringsStart = nameOffset + view.getUint16(nameOffset + 4);
+    for (let index = 0; index < count; index += 1) {
+      const record = nameOffset + 6 + index * 12;
+      const platformId = view.getUint16(record);
+      const nameId = view.getUint16(record + 6);
+      if (nameId !== 6) continue;
+      const length = view.getUint16(record + 8);
+      const offset = view.getUint16(record + 10);
+      let value = "";
+      if (platformId === 3 || platformId === 0) {
+        for (let cursor = 0; cursor < length; cursor += 2) {
+          value += String.fromCharCode(view.getUint16(stringsStart + offset + cursor));
+        }
+      } else {
+        for (let cursor = 0; cursor < length; cursor += 1) {
+          value += String.fromCharCode(view.getUint8(stringsStart + offset + cursor));
+        }
+      }
+      value = value.trim();
+      if (value) return value;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+// src/core/psd.js
 var makeCanvas = createCanvas;
 var BLEND_MODES = {
   normal: "source-over",
@@ -16444,7 +16628,11 @@ async function parseTemplate(file, onStage = () => {
     leaves,
     hidden,
     slots: /* @__PURE__ */ new Set(),
-    size: file.size
+    size: file.size,
+    // Edits live on the document so a re-compose keeps them, and so a project
+    // file can round-trip them instead of re-deriving from the PSD.
+    textEdits: /* @__PURE__ */ new Map(),
+    elements: []
   };
 }
 var FONT_FAMILY_MAP = [
@@ -16467,11 +16655,12 @@ var FONT_FAMILY_MAP = [
   [/^Roboto/i, "Roboto"]
 ];
 function fontFamilyOf(name) {
-  const raw = String(name || "");
+  const raw = String(name || "").replace(/^#/, "").trim();
+  if (!raw) return null;
   for (const [pattern, family] of FONT_FAMILY_MAP) {
     if (pattern.test(raw)) return family;
   }
-  return raw.split(/[-_ ]/)[0] || raw || null;
+  return raw;
 }
 function fontWeightOf(name, fauxBold) {
   const raw = String(name || "").toLowerCase();
@@ -16559,8 +16748,18 @@ function describeTextLayer(text) {
     total = runs.reduce((sum, run) => sum + run.len, 0);
   }
   if (!runs.length && value.length) runs.push({ len: value.length, ...base });
-  return { value, runs };
+  const paragraph = style.paragraphStyle || {};
+  const leading = Number(style.leading) || 0;
+  return {
+    value,
+    runs,
+    align: paragraph.align != null ? PARAGRAPH_ALIGN[paragraph.align] || "left" : "left",
+    leading,
+    autoLeading: style.autoLeading !== false,
+    fontSize: base.size
+  };
 }
+var PARAGRAPH_ALIGN = { 0: "left", 1: "right", 2: "center", 3: "justify" };
 function buildTree(psd) {
   const entries = [];
   const leaves = [];
@@ -16887,8 +17086,68 @@ function isStackedCopy(base, other, doc) {
   return true;
 }
 var SLOT_SIBLING_OVERLAP = 0.25;
+function applyTextEdit(doc, leaf) {
+  if (!leaf.isText || !doc.textEdits || doc.textEdits.size === 0) return leaf;
+  const edit = doc.textEdits.get(leaf.entryId);
+  if (!edit) return leaf;
+  const entry = doc.entries.find((item) => item.id === leaf.entryId);
+  if (!entry || !entry.text) return leaf;
+  const text = {
+    ...entry.text,
+    ...edit.value !== void 0 ? { value: edit.value } : null,
+    ...edit.runs ? { runs: edit.runs } : null,
+    ...edit.leading !== void 0 ? { leading: edit.leading } : null,
+    ...edit.align !== void 0 ? { align: edit.align } : null
+  };
+  if (!Array.isArray(text.runs) || text.runs.length === 0) {
+    text.runs = [{ len: String(text.value).length, ...{ size: edit.sizePx || entry.text.fontSize || 12, family: edit.family || "PingFang SC", weight: edit.weight || 400, color: edit.color || [0, 0, 0], tracking: edit.tracking || 0 } }];
+  }
+  const rendered = renderTextEntry(
+    { ...entry, text },
+    { align: edit.align, tracking: edit.tracking }
+  );
+  if (!rendered || !rendered.canvas) return leaf;
+  return {
+    ...leaf,
+    canvas: rendered.canvas,
+    width: rendered.canvas.width,
+    height: rendered.canvas.height,
+    left: rendered.left + (edit.dx || 0),
+    top: rendered.top + (edit.dy || 0),
+    edited: true
+  };
+}
+function elementLeaves(doc) {
+  return (doc.elements || []).map((element, index) => ({
+    id: `x${index}`,
+    entryId: null,
+    name: element.name || `\u5143\u7D20 ${index + 1}`,
+    left: element.left || 0,
+    top: element.top || 0,
+    width: element.canvas.width,
+    height: element.canvas.height,
+    canvas: element.canvas,
+    mask: null,
+    opacity: element.opacity == null ? 1 : element.opacity,
+    blendMode: element.blend || "normal",
+    clipping: false,
+    effects: null,
+    isText: false,
+    isElement: true,
+    path: [],
+    aboveSlots: element.aboveSlots !== false
+  }));
+}
 function buildScene(doc) {
-  const visibleLeaves = doc.leaves.filter((leaf) => isLeafVisible(doc, leaf));
+  const stacked = [];
+  const below = [];
+  const above = [];
+  for (const element of elementLeaves(doc)) (element.aboveSlots ? above : below).push(element);
+  const visibleLeaves = [
+    ...below,
+    ...doc.leaves.filter((leaf) => isLeafVisible(doc, leaf)).map((leaf) => applyTextEdit(doc, leaf)),
+    ...above
+  ];
   const entryById = new Map(doc.entries.map((entry) => [entry.id, entry]));
   const clusters = [];
   const clusterOf = /* @__PURE__ */ new Map();
@@ -17093,6 +17352,7 @@ function uniqueName(used, base, extension) {
 // src/server.js
 setCanvasFactory((width, height) => createCanvas2(width, height));
 (0, import_ag_psd2.initializeCanvas)((width, height) => createCanvas2(width, height));
+setFontFaceInstaller((family, filePath) => GlobalFonts.registerFromPath(filePath, family));
 var IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([".png", ".jpg", ".jpeg", ".webp", ".bmp"]);
 var templateCache = /* @__PURE__ */ new Map();
 async function resolveInWorkspace(cwd, candidate, { mustExist = true } = {}) {
@@ -17322,6 +17582,268 @@ async function renderBatch({
     ...zipPath ? { zip: path.relative(cwd, zipPath) } : {}
   };
 }
+function findTextEntry(doc, spec) {
+  const wanted = String(spec || "").trim();
+  if (!wanted) throw new Error("A text layer name or id is required");
+  const byId = doc.entries.find((entry) => entry.id === wanted || entry.leafId === wanted);
+  if (byId && byId.text) return byId;
+  const matches = doc.entries.filter((entry) => entry.name === wanted && entry.text);
+  if (matches.length === 0) {
+    const names = doc.entries.filter((entry) => entry.text).map((entry) => entry.name);
+    throw new Error(`Text layer not found: ${wanted}. Text layers: ${names.join(" | ")}`);
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      `Text layer name is ambiguous (${matches.length} matches): ${wanted}. Use one of: ${matches.map((entry) => entry.id).join(", ")}`
+    );
+  }
+  return matches[0];
+}
+function normalizeColor(raw) {
+  if (Array.isArray(raw) && raw.length >= 3) {
+    return raw.slice(0, 3).map((value) => Math.max(0, Math.min(255, Math.round(Number(value) || 0))));
+  }
+  if (typeof raw === "string") {
+    const hex = raw.replace("#", "");
+    if (/^[0-9a-f]{6}$/i.test(hex)) {
+      return [0, 2, 4].map((offset) => parseInt(hex.slice(offset, offset + 2), 16));
+    }
+  }
+  return null;
+}
+function normalizeRuns(raw, fallback) {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const runs = [];
+  for (const item of raw) {
+    const length = Math.max(0, Math.round(Number(item && item.len)));
+    if (!length) continue;
+    const run = { len: length };
+    if (item.family) run.family = String(item.family);
+    if (item.weight) run.weight = Number(item.weight);
+    if (item.sizePx) run.size = Number(item.sizePx);
+    else if (item.size) run.size = Number(item.size);
+    const color = normalizeColor(item.color);
+    if (color) run.color = color;
+    if (item.tracking != null) run.tracking = Number(item.tracking);
+    runs.push({ ...fallback, ...run });
+  }
+  return runs.length ? runs : null;
+}
+function composeElement(image, { scale = 1, rotation = 0 } = {}) {
+  const width = Math.max(1, Math.round(image.width * scale));
+  const height = Math.max(1, Math.round(image.height * scale));
+  if (!rotation) {
+    const canvas2 = createCanvas2(width, height);
+    canvas2.getContext("2d").drawImage(image, 0, 0, width, height);
+    return canvas2;
+  }
+  const radians = rotation * Math.PI / 180;
+  const cos = Math.abs(Math.cos(radians));
+  const sin = Math.abs(Math.sin(radians));
+  const canvas = createCanvas2(Math.ceil(width * cos + height * sin), Math.ceil(width * sin + height * cos));
+  const ctx = canvas.getContext("2d");
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.rotate(radians);
+  ctx.drawImage(image, -width / 2, -height / 2, width, height);
+  return canvas;
+}
+async function registerFontFiles(cwd, { dir, paths }) {
+  const files = [];
+  if (dir) {
+    const directory = await resolveInWorkspace(cwd, dir);
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isFile()) continue;
+      if (!/\.(ttf|otf|ttc|otc|woff2?)$/i.test(entry.name)) continue;
+      files.push(path.join(directory, entry.name));
+    }
+  }
+  for (const item of paths || []) files.push(await resolveInWorkspace(cwd, item));
+  if (files.length === 0) throw new Error("Pass `dir` or `paths` with font files to register");
+  const loaded = [];
+  const failed = [];
+  for (const file of files) {
+    const stem = path.basename(file, path.extname(file)).replace(/_+/g, " ").replace(/\s+/g, " ").trim();
+    const aliases = /* @__PURE__ */ new Set([stem]);
+    try {
+      const buffer = await fs.readFile(file);
+      const postScript = readFontPostScriptName(buffer);
+      if (postScript) aliases.add(postScript);
+    } catch {
+    }
+    let ok = false;
+    for (const alias of aliases) {
+      try {
+        if (GlobalFonts.registerFromPath(file, alias)) {
+          markFontRegistered(alias);
+          ok = true;
+        }
+      } catch (error) {
+        if (alias === stem) failed.push(`${alias}: ${String(error && error.message || error).slice(0, 80)}`);
+      }
+    }
+    if (ok) loaded.push(...aliases);
+  }
+  return { loaded: [...new Set(loaded)], failed };
+}
+function serializeProject(doc, template) {
+  const textEdits = {};
+  for (const [entryId, edit] of doc.textEdits || []) textEdits[entryId] = edit;
+  return {
+    version: 1,
+    template,
+    slots: [...doc.slots || []],
+    textEdits,
+    elements: (doc.elements || []).map((element) => ({
+      name: element.name,
+      source: element.source,
+      left: element.left,
+      top: element.top,
+      scale: element.scale,
+      rotation: element.rotation,
+      opacity: element.opacity,
+      blend: element.blend,
+      aboveSlots: element.aboveSlots
+    })),
+    fonts: registeredFonts()
+  };
+}
+async function applyProject(doc, cwd, project) {
+  doc.textEdits = new Map(Object.entries(project.textEdits || {}));
+  doc.elements = [];
+  for (const element of project.elements || []) {
+    if (!element.source) continue;
+    const file = await resolveInWorkspace(cwd, element.source);
+    const image = await loadImage(file);
+    doc.elements.push({
+      ...element,
+      canvas: composeElement(image, { scale: element.scale || 1, rotation: element.rotation || 0 })
+    });
+  }
+  if (Array.isArray(project.slots)) doc.slots = new Set(project.slots);
+  return doc;
+}
+async function editTemplate(options) {
+  const { cwd, template, action } = options;
+  if (!action) throw new Error("An action is required");
+  const absolute = await resolveInWorkspace(cwd, template);
+  const doc = await loadTemplateDoc(absolute);
+  if (action === "status") {
+    return {
+      template: path.relative(cwd, absolute) || template,
+      slots: [...doc.slots || []],
+      textEdits: [...(doc.textEdits || /* @__PURE__ */ new Map()).keys()],
+      elements: (doc.elements || []).map((element) => element.name),
+      fonts: registeredFonts(),
+      neededFonts: templateFamilies(doc),
+      missingFonts: unregisteredFamilies(doc)
+    };
+  }
+  if (action === "text") {
+    const entry = findTextEntry(doc, options.layer);
+    const edit = { ...doc.textEdits.get(entry.id) || {} };
+    if (options.text !== void 0) edit.value = String(options.text);
+    if (options.align) edit.align = String(options.align);
+    if (options.leading != null) edit.leading = Number(options.leading);
+    if (options.dx != null) edit.dx = Number(options.dx);
+    if (options.dy != null) edit.dy = Number(options.dy);
+    if (options.tracking != null) edit.tracking = Number(options.tracking);
+    const baseRun = {
+      family: options.family || entry.text.runs[0].family,
+      weight: Number(options.weight) || entry.text.runs[0].weight,
+      size: Number(options.sizePx) || entry.text.runs[0].size,
+      color: normalizeColor(options.color) || entry.text.runs[0].color,
+      tracking: options.tracking != null ? Number(options.tracking) : entry.text.runs[0].tracking
+    };
+    const runs = normalizeRuns(options.runs, baseRun);
+    if (runs) {
+      edit.runs = runs;
+    } else if (options.family || options.sizePx || options.weight || options.color) {
+      edit.runs = entry.text.runs.map((run) => ({ ...run, ...baseRun }));
+    }
+    if (options.value !== void 0 && !edit.runs) {
+      edit.runs = [{ len: String(options.text).length, ...baseRun }];
+    }
+    const missing = (edit.runs || entry.text.runs).map((run) => run.family).filter((family) => family && !registeredFonts().includes(family));
+    doc.textEdits.set(entry.id, edit);
+    return {
+      layer: entry.name,
+      entryId: entry.id,
+      value: edit.value !== void 0 ? edit.value : entry.text.value,
+      runs: (edit.runs || entry.text.runs).length,
+      warning: missing.length ? `Font not registered, the canvas will fall back: ${[...new Set(missing)].join(", ")}` : void 0
+    };
+  }
+  if (action === "element") {
+    const files = [];
+    for (const item of options.paths || []) files.push(await resolveInWorkspace(cwd, item));
+    if (files.length === 0) throw new Error("Pass `paths` with one or more images");
+    const placed = [];
+    for (const file of files) {
+      const image = await loadImage(file);
+      const scale = Number(options.scale) > 0 ? Number(options.scale) : 1;
+      const rotation = Number(options.rotation) || 0;
+      const canvas = composeElement(image, { scale, rotation });
+      const element = {
+        name: options.name ? String(options.name) : path.basename(file, path.extname(file)),
+        source: path.relative(cwd, file),
+        canvas,
+        left: Number(options.dx) || 0,
+        top: Number(options.dy) || 0,
+        scale,
+        rotation,
+        opacity: options.opacity == null ? 1 : Math.max(0, Math.min(1, Number(options.opacity))),
+        blend: options.blend || "normal",
+        aboveSlots: options.aboveSlots !== false
+      };
+      doc.elements.push(element);
+      placed.push({ name: element.name, left: element.left, top: element.top, w: canvas.width, h: canvas.height });
+    }
+    return { placed, total: doc.elements.length };
+  }
+  if (action === "remelement") {
+    const names = (options.names || []).map(String);
+    if (names.length === 0) throw new Error("Pass `names` with the elements to remove");
+    const before = doc.elements.length;
+    doc.elements = doc.elements.filter((element) => !names.includes(element.name));
+    const removed = before - doc.elements.length;
+    return { removed, total: doc.elements.length, names: doc.elements.map((element) => element.name) };
+  }
+  if (action === "fonts") {
+    const result = await registerFontFiles(cwd, { dir: options.dir, paths: options.paths || options.fonts });
+    return {
+      ...result,
+      registered: registeredFonts(),
+      missingFonts: unregisteredFamilies(doc)
+    };
+  }
+  if (action === "save_project") {
+    if (!options.project) throw new Error("Pass `project` with the JSON path to write");
+    const projectPath = await resolveInWorkspace(cwd, options.project, { mustExist: false });
+    await fs.mkdir(path.dirname(projectPath), { recursive: true });
+    const data = serializeProject(doc, path.relative(cwd, absolute));
+    await fs.writeFile(projectPath, JSON.stringify(data, null, 2));
+    return { project: path.relative(cwd, projectPath), textEdits: Object.keys(data.textEdits).length, elements: data.elements.length };
+  }
+  if (action === "load_project") {
+    if (!options.project) throw new Error("Pass `project` with the JSON path to read");
+    const projectPath = await resolveInWorkspace(cwd, options.project);
+    const project = JSON.parse(await fs.readFile(projectPath, "utf8"));
+    await applyProject(doc, cwd, project);
+    return {
+      project: path.relative(cwd, projectPath),
+      textEdits: doc.textEdits.size,
+      elements: doc.elements.length,
+      slots: [...doc.slots]
+    };
+  }
+  if (action === "reset") {
+    doc.textEdits = /* @__PURE__ */ new Map();
+    doc.elements = [];
+    return { ok: true, textEdits: 0, elements: 0 };
+  }
+  throw new Error(`Unknown action: ${action}. Use status / text / element / remelement / fonts / save_project / load_project / reset`);
+}
 function registerTools(ctx) {
   const disposers = [];
   disposers.push(
@@ -17540,11 +18062,122 @@ ZIP: ${value.zip}` : ""}`
       isConcurrencySafe: () => false
     })
   );
+  disposers.push(
+    ctx.tools.register({
+      name: "psd_edit",
+      description: "Edit a loaded PSD/PSB template before rendering: rewrite a text layer (whole layer or per-run styles, so a price line can mix two fonts and colours), place extra image layers on top of or below the product slot, register font files, and save or load the project so edits survive between sessions. Edits land on the cached document, so a following psd_batch_render uses them without re-parsing the PSD.",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        required: ["template", "action"],
+        properties: {
+          template: {
+            type: "string",
+            description: "PSD or PSB path relative to the session working directory."
+          },
+          action: {
+            type: "string",
+            enum: [
+              "status",
+              "text",
+              "element",
+              "remelement",
+              "fonts",
+              "save_project",
+              "load_project",
+              "reset"
+            ],
+            description: "status: current edits, fonts and missing fonts. text: rewrite a text layer. element / remelement: add or remove placed images. fonts: register font files. save_project / load_project: persist edits. reset: drop every edit."
+          },
+          layer: {
+            type: "string",
+            description: "Text layer name, entry id (e12) or leaf id (l3). Required for action=text."
+          },
+          text: {
+            type: "string",
+            description: "New copy. Keep the run lengths in step when you also pass `runs`."
+          },
+          runs: {
+            type: "array",
+            description: 'Per-run styles, one entry per contiguous character group with its `len`. Use it when one line mixes fonts, sizes or colours, e.g. [{len:1},{len:1,sizePx:138,color:"#CC3046"},{len:2}]. Omitted fields inherit the layer base style.',
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                len: { type: "number", description: "Character count of this run." },
+                family: { type: "string", description: "Font family to use for the run." },
+                weight: { type: "number", description: "Font weight, 100-900." },
+                sizePx: { type: "number", description: "Font size in canvas pixels." },
+                color: { type: "string", description: "Fill colour as #rrggbb." },
+                tracking: { type: "number", description: "Letter spacing in points." }
+              }
+            }
+          },
+          family: { type: "string", description: "Restyle the whole layer with this font family." },
+          weight: { type: "number", description: "Restyle the whole layer with this weight." },
+          sizePx: { type: "number", description: "Restyle the whole layer with this size in canvas pixels." },
+          color: { type: "string", description: "Restyle the whole layer with this fill colour (#rrggbb)." },
+          tracking: { type: "number", description: "Letter spacing, points." },
+          align: {
+            type: "string",
+            enum: ["left", "center", "right"],
+            description: "Paragraph alignment for the repainted layer."
+          },
+          leading: { type: "number", description: "Line height in points. Omit to keep the PSD value." },
+          dx: { type: "number", description: "Horizontal nudge in canvas pixels." },
+          dy: { type: "number", description: "Vertical nudge in canvas pixels." },
+          paths: {
+            type: "array",
+            description: "Images to place (relative paths). Required for action=element.",
+            items: { type: "string" }
+          },
+          name: { type: "string", description: "Element name. Defaults to the file name." },
+          scale: { type: "number", description: "Element scale, 1 = original size." },
+          rotation: { type: "number", description: "Element rotation in degrees." },
+          opacity: { type: "number", description: "Element opacity, 0-1." },
+          blend: { type: "string", description: "Blend mode, e.g. multiply / screen / overlay." },
+          aboveSlots: {
+            type: "boolean",
+            description: "Draw the element above the product slot (default true). Set false to sit under it."
+          },
+          names: {
+            type: "array",
+            description: "Element names to remove (action=remelement).",
+            items: { type: "string" }
+          },
+          dir: { type: "string", description: "Folder of font files to register (action=fonts)." },
+          fonts: {
+            type: "array",
+            description: "Font files to register (action=fonts).",
+            items: { type: "string" }
+          },
+          project: {
+            type: "string",
+            description: "Project JSON path for action=save_project / load_project."
+          }
+        }
+      },
+      output: {
+        schema: {
+          type: "object",
+          additionalProperties: true
+        }
+      },
+      async execute(args, exec) {
+        if (!exec.agent) throw new Error("psd_edit requires an agent session");
+        const cwd = await ctx.workingDirectory.ensure(exec.agent, exec.signal);
+        return editTemplate({ cwd, ...args });
+      },
+      timeoutMs: 5 * 60 * 1e3,
+      isConcurrencySafe: () => false
+    })
+  );
   return () => {
     for (const dispose of disposers) dispose();
   };
 }
 export {
+  editTemplate,
   inspectTemplate,
   registerTools,
   renderBatch

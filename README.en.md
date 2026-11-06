@@ -70,8 +70,20 @@ out/0715-main/*.jpg  (+ optional ZIP)
   offset/scale/rotation numerically, and copy one adjustment to the whole batch.
 - **Export** — JPG or PNG at the template resolution, one file per SKU, packed
   into a ZIP when requested.
-- **Agent tools** — `psd_inspect` and `psd_batch_render` expose the same pipeline
-  to the agent for unattended batches.
+- **Text repaint** — a text layer is no longer locked to its rasterized pixels:
+  change the copy, swap the font, and adjust size/colour/tracking/alignment; the
+  layer is redrawn inside its original box so position and line count stay put.
+- **Per-run styles** — one line can mix faces, sizes and colours through
+  `{len, family, weight, sizePx, color, tracking}` segments.
+- **Font registration** — imported font files register under both their file stem
+  and their PostScript name; a template that needs a missing font is reported
+  instead of silently falling back.
+- **Placed elements** — drop extra image layers (gift shots, props) with offset,
+  scale, rotation, opacity and blend mode, above or below the product slot.
+- **Project files** — slots, text edits, elements and the font registry persist
+  as JSON between sessions.
+- **Agent tools** — `psd_inspect`, `psd_batch_render` and `psd_edit` expose the
+  same pipeline to the agent for unattended batches.
 - **Local-first** — PSD parsing and compositing happen in the browser (or in the
   Host process for agent batches). No network calls, no telemetry, no upload.
 
@@ -152,6 +164,7 @@ npm test
 | --- | --- |
 | `psd_inspect` | Template size, layer tree (name, depth, visibility, bounds, leaf id), and auto-detected slots. Text layers also report their copy plus per-run styles (family, weight, size, color). |
 | `psd_batch_render` | Render many SKUs into one template and write JPG/PNG files (optionally a ZIP) inside the workspace. The `suppressed` result lists slot siblings hidden together with the slot. |
+| `psd_edit` | Edit the template before rendering: `text` (copy, per-run styles, font swap), `element` / `remelement` (add or remove image layers), `fonts` (register font files), `save_project` / `load_project` (project round-trip), `status`, `reset`. Edits land on the cached document, so the next `psd_batch_render` uses them. |
 
 Example request:
 
@@ -207,8 +220,12 @@ server.js      built Host artifact
 
 ## Compatibility and limits
 
-- Text layers are used as rasterized PSD pixels; editing copy/fonts inside the
-  studio is not supported yet.
+- Text layers still start from their rasterized PSD pixels; only layers touched
+  by `psd_edit` are repainted. Tracking and leading are derived from the layer's
+  original box, so extreme sizes may need a `sizePx` nudge.
+- A repainted layer needs its font registered. When it is missing, `psd_edit`
+  returns a `warning` and `status.missingFonts` keeps listing what the template
+  needs — it never falls back quietly.
 - Bevel/emboss and inner-shadow layer styles are approximated or skipped;
   stroke/shadow/glow are approximations. The compositor is tuned for typical
   e-commerce main-image templates.

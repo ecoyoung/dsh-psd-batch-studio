@@ -21,8 +21,26 @@ import {
   uniqueName,
   zipFiles,
 } from '../core/export.js'
+import {
+  setFontFaceInstaller,
+  registerFont,
+  unregisteredFamilies,
+} from '../core/text.js'
 import { CSS } from './styles.js'
 import { Icon } from './icons.jsx'
+
+// Browser side of the font registry: a repainted text layer needs the real
+// face, and canvas falls back silently when the family is unknown, so the
+// page loads font files through FontFace before composing.
+setFontFaceInstaller(async (family, source) => {
+  const url = typeof source === 'string' ? source : URL.createObjectURL(source)
+  const response = await fetch(url)
+  const buffer = await response.arrayBuffer()
+  const face = new FontFace(family, buffer)
+  await face.load()
+  document.fonts.add(face)
+  return true
+})
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
 
@@ -126,7 +144,8 @@ export function createStudio(ctx, t) {
     const wrapRef = React.useRef(null)
     const canvasRef = React.useRef(null)
     const psdInputRef = React.useRef(null)
-    const imgInputRef = React.useRef(null)
+    const fontInputRef = React.useRef(null)
+  const imgInputRef = React.useRef(null)
     const dragRef = React.useRef(null)
     const viewRef = React.useRef({ scale: 1, ox: 0, oy: 0, base: 1, w: 0, h: 0 })
     const cancelRef = React.useRef(false)
@@ -377,6 +396,41 @@ export function createStudio(ctx, t) {
       [selectedId],
     )
 
+    const loadFonts = React.useCallback(
+      async (files) => {
+        const list = Array.from(files || []).filter((file) =>
+          /\.(ttf|otf|ttc|otc|woff2?)$/i.test(file.name),
+        )
+        if (list.length === 0) {
+          setToast({ type: 'error', text: t('toast.notFont') })
+          return
+        }
+        let loaded = 0
+        const failed = []
+        for (const file of list) {
+          const family = file.name.replace(/\.[^.]+$/, '').replace(/_+/g, ' ').trim()
+          try {
+            await registerFont(family, file)
+            loaded += 1
+          } catch (error) {
+            failed.push(`${family}: ${String((error && error.message) || error).slice(0, 60)}`)
+          }
+        }
+        if (loaded) {
+          setToast({ type: 'ok', text: t('toast.fontsLoaded', { n: loaded }) })
+          setDoc((previous) => {
+            if (!previous) return previous
+            const next = { ...previous }
+            next.scene = buildScene(next)
+            return next
+          })
+        } else {
+          setToast({ type: 'error', text: failed[0] || t('toast.notFont') })
+        }
+      },
+      [t],
+    )
+
     const loadTemplate = React.useCallback(
       async (file) => {
         if (!file) return
@@ -391,17 +445,25 @@ export function createStudio(ctx, t) {
           await new Promise((resolve) => setTimeout(resolve, 24))
           next.slots = new Set(suggestSlots(next))
           next.scene = buildScene(next)
+          const missing = unregisteredFamilies(next)
           setDoc(next)
           setQuery('')
           setView({ zoom: 1, panX: 0, panY: 0 })
-          setToast({
-            type: 'ok',
-            text: t('toast.templateLoaded', {
-              w: next.width,
-              h: next.height,
-              layers: next.leaves.length,
-            }),
-          })
+          setToast(
+            missing.length
+              ? {
+                  type: 'error',
+                  text: t('toast.fontsMissing', { list: missing.join(', ') }),
+                }
+              : {
+                  type: 'ok',
+                  text: t('toast.templateLoaded', {
+                    w: next.width,
+                    h: next.height,
+                    layers: next.leaves.length,
+                  }),
+                },
+          )
         } catch (error) {
           setToast({
             type: 'error',
@@ -742,6 +804,22 @@ export function createStudio(ctx, t) {
           <button className="psb-btn" onClick={() => imgInputRef.current?.click()}>
             <Icon name="plus" size={14} />
             {t('action.addSkus')}
+          </button>
+          <input
+            ref={fontInputRef}
+            type="file"
+            accept=".ttf,.otf,.ttc,.woff,.woff2"
+            multiple
+            style={{ display: 'none' }}
+            onChange={(event) => {
+              const files = Array.from(event.target.files || [])
+              event.target.value = ''
+              if (files.length) loadFonts(files)
+            }}
+          />
+          <button className="psb-btn" onClick={() => fontInputRef.current?.click()}>
+            <Icon name="wand" size={14} />
+            {t('action.loadFonts')}
           </button>
           <select
             className="psb-select"

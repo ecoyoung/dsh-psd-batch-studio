@@ -8,6 +8,7 @@
  */
 import { readPsd } from 'ag-psd'
 import { createCanvas } from './canvas.js'
+import { renderTextEntry } from './text.js'
 
 const makeCanvas = createCanvas
 
@@ -89,6 +90,10 @@ export async function parseTemplate(file, onStage = () => {}) {
     hidden,
     slots: new Set(),
     size: file.size,
+    // Edits live on the document so a re-compose keeps them, and so a project
+    // file can round-trip them instead of re-deriving from the PSD.
+    textEdits: new Map(),
+    elements: [],
   }
 }
 
@@ -114,11 +119,16 @@ const FONT_FAMILY_MAP = [
 ]
 
 function fontFamilyOf(name) {
-  const raw = String(name || '')
+  const raw = String(name || '').replace(/^#/, '').trim()
+  if (!raw) return null
   for (const [pattern, family] of FONT_FAMILY_MAP) {
     if (pattern.test(raw)) return family
   }
-  return raw.split(/[-_ ]/)[0] || raw || null
+  // PSD stores PostScript names (GlowSansSC-Normal-Medium, MiSans-Medium) and
+  // fonts are registered under the file stem, which is that same name. Cutting
+  // it to "GlowSansSC" / "MiSans" matches neither the registered face nor the
+  // system family, so every layer would fall back without a word.
+  return raw
 }
 
 function fontWeightOf(name, fauxBold) {
@@ -220,8 +230,20 @@ function describeTextLayer(text) {
     total = runs.reduce((sum, run) => sum + run.len, 0)
   }
   if (!runs.length && value.length) runs.push({ len: value.length, ...base })
-  return { value, runs }
+  const paragraph = style.paragraphStyle || {}
+  const leading = Number(style.leading) || 0
+  return {
+    value,
+    runs,
+    align: paragraph.align != null ? PARAGRAPH_ALIGN[paragraph.align] || 'left' : 'left',
+    leading,
+    autoLeading: style.autoLeading !== false,
+    fontSize: base.size,
+  }
 }
+
+// ag-psd keeps the Photoshop enum: 0 left, 1 right, 2 center, 3 justify.
+const PARAGRAPH_ALIGN = { 0: 'left', 1: 'right', 2: 'center', 3: 'justify' }
 
 function buildTree(psd) {
   const entries = []
@@ -631,8 +653,81 @@ const SLOT_SIBLING_OVERLAP = 0.25
  *
  * @returns {{parts: Array<object>, slots: Array<object>, suppressed: Array<object>, width: number, height: number}}
  */
+/**
+ * Replace a text leaf's raster pixels with a repaint of its (possibly edited)
+ * copy. The layer keeps its own opacity, blend mode and effects, so only the
+ * pixels change; the box stays where the designer put it unless the edit moves
+ * it explicitly.
+ */
+function applyTextEdit(doc, leaf) {
+  if (!leaf.isText || !doc.textEdits || doc.textEdits.size === 0) return leaf
+  const edit = doc.textEdits.get(leaf.entryId)
+  if (!edit) return leaf
+  const entry = doc.entries.find((item) => item.id === leaf.entryId)
+  if (!entry || !entry.text) return leaf
+
+  const text = {
+    ...entry.text,
+    ...(edit.value !== undefined ? { value: edit.value } : null),
+    ...(edit.runs ? { runs: edit.runs } : null),
+    ...(edit.leading !== undefined ? { leading: edit.leading } : null),
+    ...(edit.align !== undefined ? { align: edit.align } : null),
+  }
+  if (!Array.isArray(text.runs) || text.runs.length === 0) {
+    text.runs = [{ len: String(text.value).length, ...{ size: edit.sizePx || entry.text.fontSize || 12, family: edit.family || 'PingFang SC', weight: edit.weight || 400, color: edit.color || [0, 0, 0], tracking: edit.tracking || 0 } }]
+  }
+
+  const rendered = renderTextEntry(
+    { ...entry, text },
+    { align: edit.align, tracking: edit.tracking },
+  )
+  if (!rendered || !rendered.canvas) return leaf
+
+  return {
+    ...leaf,
+    canvas: rendered.canvas,
+    width: rendered.canvas.width,
+    height: rendered.canvas.height,
+    left: rendered.left + (edit.dx || 0),
+    top: rendered.top + (edit.dy || 0),
+    edited: true,
+  }
+}
+
+/** Same shape as a leaf, so placed elements ride through the layer compositor. */
+function elementLeaves(doc) {
+  return (doc.elements || []).map((element, index) => ({
+    id: `x${index}`,
+    entryId: null,
+    name: element.name || `元素 ${index + 1}`,
+    left: element.left || 0,
+    top: element.top || 0,
+    width: element.canvas.width,
+    height: element.canvas.height,
+    canvas: element.canvas,
+    mask: null,
+    opacity: element.opacity == null ? 1 : element.opacity,
+    blendMode: element.blend || 'normal',
+    clipping: false,
+    effects: null,
+    isText: false,
+    isElement: true,
+    path: [],
+    aboveSlots: element.aboveSlots !== false,
+  }))
+}
+
 export function buildScene(doc) {
-  const visibleLeaves = doc.leaves.filter((leaf) => isLeafVisible(doc, leaf))
+  const stacked = []
+  const below = []
+  const above = []
+  for (const element of elementLeaves(doc)) (element.aboveSlots ? above : below).push(element)
+
+  const visibleLeaves = [
+    ...below,
+    ...doc.leaves.filter((leaf) => isLeafVisible(doc, leaf)).map((leaf) => applyTextEdit(doc, leaf)),
+    ...above,
+  ]
   const entryById = new Map(doc.entries.map((entry) => [entry.id, entry]))
   const clusters = []
   const clusterOf = new Map()
