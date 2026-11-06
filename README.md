@@ -68,7 +68,7 @@ out/0715-main/*.jpg（可选 ZIP）
 plugin_manager install_bundle, target = dsh-psd-batch-studio
 ```
 
-固定版本用 `dsh-psd-batch-studio@0.2.4`。
+固定版本用 `dsh-psd-batch-studio@0.2.5`。
 
 也可以从 GitHub 安装：
 
