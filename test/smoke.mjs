@@ -77,6 +77,25 @@ function buildFixturePsd() {
           ],
         },
       },
+      // Two-colour copy: red AA, blue ZZ. A value-only rewrite must keep the
+      // untouched suffix blue.
+      {
+        name: '双色',
+        left: 160,
+        top: 20,
+        right: 400,
+        bottom: 90,
+        canvas: fillCanvas(240, 70, '#dddddd'),
+        text: {
+          text: 'AAZZ',
+          transform: [1, 0, 0, 1, 160, 20],
+          style: { font: { name: 'ArialMT' }, fontSize: 48, fillColor: { r: 255, g: 0, b: 0 } },
+          styleRuns: [
+            { length: 2, style: { fillColor: { r: 255, g: 0, b: 0 } } },
+            { length: 2, style: { fillColor: { r: 0, g: 0, b: 255 } } },
+          ],
+        },
+      },
       // Non-RGB fill colors: grayscale and CMYK documents must not report as
       // pure black.
       {
@@ -457,6 +476,49 @@ async function main() {
     }
     assert.ok(red > 30, `first glyph renders red (${red} px)`)
     assert.ok(blue > red, `last three glyphs render blue (${blue} px vs ${red} red)`)
+
+    // --- regression: a value-only rewrite keeps untouched characters' style
+    const twoColor = (await parseFixture(cwd, 'fixture.psd')).entries.find((entry) => entry.name === '双色').text
+    const valueOnly = mergeTextOverride(twoColor, { value: 'ABZZ' })
+    assert.deepEqual(valueOnly.runs.map((run) => run.len), [2, 2], 'value-only rewrite keeps the [2, 2] split')
+    assert.deepEqual(valueOnly.runs.map((run) => run.color), [[255, 0, 0], [0, 0, 255]])
+    const countColors = async (dir, files) => {
+      const ctx = createCanvas(800, 800).getContext('2d')
+      ctx.drawImage(await loadImageFrom(path.join(cwd, dir, files[0])), 0, 0)
+      // 双色 area only: right of 角标 (x 140), above the SKU (y 230).
+      const data = ctx.getImageData(145, 0, 300, 120).data
+      let redCount = 0
+      let blueCount = 0
+      for (let index = 0; index < data.length; index += 4) {
+        const [r, g, b] = [data[index], data[index + 1], data[index + 2]]
+        if (r > 200 && g < 60 && b < 60) redCount += 1
+        if (b > 200 && r < 60 && g < 60) blueCount += 1
+      }
+      return { redCount, blueCount }
+    }
+    const valueRender = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png'],
+      outDir: 'out-value-only',
+      format: 'png',
+      text: [{ layer: '双色', value: 'ABZZ' }],
+    })
+    const valueColors = await countColors('out-value-only', valueRender.files)
+    const runsRender = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png'],
+      outDir: 'out-value-runs',
+      format: 'png',
+      text: [{ layer: '双色', value: 'ABZZ', runs: [{ len: 2, color: '#ff0000' }, { len: 2, color: '#0000ff' }] }],
+    })
+    const runsColors = await countColors('out-value-runs', runsRender.files)
+    assert.ok(valueColors.blueCount > 30, `ZZ still blue after a value-only rewrite (${valueColors.blueCount} px)`)
+    assert.ok(
+      Math.abs(valueColors.blueCount - runsColors.blueCount) <= runsColors.blueCount * 0.05,
+      `value-only matches the explicit-runs control (${valueColors.blueCount} vs ${runsColors.blueCount} blue px)`,
+    )
 
     // --- per-SKU groups: interleaved prices keep input order, one scene each
     await fs.writeFile(path.join(cwd, 'sku-c.png'), await skuB.encode('png'))

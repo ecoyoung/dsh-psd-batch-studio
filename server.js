@@ -16521,10 +16521,10 @@ function sameStyle(a, b) {
 }
 function compressRuns(chars) {
   const runs = [];
-  for (const style of chars) {
+  for (const { len: _len, ...style } of chars) {
     const last = runs[runs.length - 1];
     if (last && sameStyle(last, style)) last.len += 1;
-    else runs.push({ len: 1, ...style });
+    else runs.push({ ...style, len: 1 });
   }
   return runs;
 }

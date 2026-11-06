@@ -181,13 +181,17 @@ function sameStyle(a, b) {
   )
 }
 
-/** Merge consecutive per-character styles into style runs. */
+/**
+ * Merge consecutive per-character styles into style runs. The length always
+ * comes from the characters counted here: per-character entries are often the
+ * original runs themselves, whose own `len` must not leak back in.
+ */
 export function compressRuns(chars) {
   const runs = []
-  for (const style of chars) {
+  for (const { len: _len, ...style } of chars) {
     const last = runs[runs.length - 1]
     if (last && sameStyle(last, style)) last.len += 1
-    else runs.push({ len: 1, ...style })
+    else runs.push({ ...style, len: 1 })
   }
   return runs
 }
