@@ -11,37 +11,125 @@ import { createCanvas, loadImage, GlobalFonts } from '@napi-rs/canvas'
 import { initializeCanvas } from 'ag-psd'
 import { zipSync } from 'fflate'
 import { setCanvasFactory } from './core/canvas.js'
-import { parseTemplate, buildScene, suggestSlots, isEntryVisible, isLeafVisible } from './core/psd.js'
-import { drawScene, measureContent, DEFAULT_SETTINGS, DEFAULT_ADJUST } from './core/fit.js'
-import { sanitizeName, uniqueName } from './core/export.js'
+import { parseTemplate, buildScene, disposeScene, suggestSlots, isEntryVisible, isLeafVisible } from './core/psd.js'
 import {
-  setFontFaceInstaller,
-  markFontRegistered,
-  registeredFonts,
-  templateFamilies,
-  unregisteredFamilies,
+  applyTextOverrides,
+  cloneDoc,
+  mergeOverrideLists,
+  mergeTextOverride,
+  pxPerPtOf,
+  fontFamilyOf,
   readFontPostScriptName,
 } from './core/text.js'
+import { drawScene, measureContent, DEFAULT_SETTINGS, DEFAULT_ADJUST } from './core/fit.js'
+import { sanitizeName, uniqueName } from './core/export.js'
 
 setCanvasFactory((width, height) => createCanvas(width, height))
 initializeCanvas((width, height) => createCanvas(width, height))
 
-// Host-side fonts come from files; the browser installer lives in the page.
-setFontFaceInstaller((family, filePath) => GlobalFonts.registerFromPath(filePath, family))
-
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp'])
+const FONT_EXTENSIONS = new Set(['.ttf', '.otf', '.ttc', '.otc', '.woff', '.woff2'])
 
 const templateCache = new Map()
 
+/** Every family name this process registered, for status and project files. */
+const registeredFamilies = new Set()
+
+/**
+ * Register font files under every name a text layer may ask for: the file
+ * stem, the PostScript name from the font's name table (what PSD styles
+ * carry), and the mapped system family ("SourceHanSansCN-Bold" → "Noto Sans
+ * SC"). `dir` may be a folder or a single file; `paths` lists files.
+ */
+async function registerFonts(cwd, { dir, paths } = {}) {
+  const files = []
+  if (dir) {
+    const absolute = await resolveInWorkspace(cwd, dir)
+    const stat = await fs.stat(absolute)
+    if (stat.isDirectory()) {
+      const entries = await fs.readdir(absolute, { withFileTypes: true })
+      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (entry.isFile()) files.push(path.join(absolute, entry.name))
+      }
+    } else {
+      files.push(absolute)
+    }
+  }
+  for (const item of paths || []) files.push(await resolveInWorkspace(cwd, item))
+
+  const registered = []
+  const skipped = []
+  for (const full of files) {
+    const extension = path.extname(full).toLowerCase()
+    if (!FONT_EXTENSIONS.has(extension)) {
+      skipped.push(path.basename(full))
+      continue
+    }
+    const stem = path.basename(full, extension).replace(/_+/g, ' ').replace(/\s+/g, ' ').trim() || 'font'
+    const aliases = [stem]
+    try {
+      const postScript = readFontPostScriptName(await fs.readFile(full))
+      if (postScript) aliases.push(postScript)
+    } catch {
+      /* unreadable name table: the file stem still works */
+    }
+    for (const alias of [...aliases]) {
+      const mapped = fontFamilyOf(alias)
+      if (mapped && !aliases.includes(mapped) && !GlobalFonts.has(mapped)) aliases.push(mapped)
+    }
+    let ok = false
+    for (const alias of new Set(aliases)) {
+      try {
+        if (GlobalFonts.registerFromPath(full, alias) !== false) {
+          registered.push(alias)
+          registeredFamilies.add(alias)
+          ok = true
+        }
+      } catch {
+        /* this alias is taken by another face */
+      }
+    }
+    if (!ok) skipped.push(path.basename(full))
+  }
+  return { registered: [...new Set(registered)], skipped }
+}
+
+/** Families a template's text layers (and its text edits) ask for. */
+function templateFamilies(doc) {
+  const families = new Set()
+  for (const entry of doc.entries) {
+    for (const run of entry.text?.runs || []) if (run.family) families.add(run.family)
+  }
+  for (const edit of doc.textEdits?.values() || []) {
+    if (edit.font) families.add(String(edit.font))
+    for (const run of edit.runs || []) if (run.family) families.add(String(run.family))
+  }
+  return [...families].sort()
+}
+
+function isInside(root, target) {
+  const relative = path.relative(root, target)
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+}
+
+/**
+ * Resolve a workspace path. Reads follow symlinks and must land inside the
+ * workspace. Writes (`mustExist: false`) check the real path of the target
+ * when it exists (a symlink must not lead out) and of its nearest existing
+ * ancestor, so a linked folder cannot redirect output elsewhere either.
+ */
 async function resolveInWorkspace(cwd, candidate, { mustExist = true } = {}) {
   if (typeof candidate !== 'string' || candidate.trim() === '') {
     throw new Error('A non-empty path is required')
   }
   const absolute = path.resolve(cwd, candidate)
-  const relative = path.relative(cwd, absolute)
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+  if (!isInside(cwd, absolute)) {
     throw new Error(`Path must stay inside the session workspace: ${candidate}`)
   }
+  const realCwd = await fs.realpath(cwd).catch(() => cwd)
+  const insideWorkspace = (real) => isInside(cwd, real) || isInside(realCwd, real)
+  const outside = () => new Error(`Path resolves outside the session workspace: ${candidate}`)
+
   if (mustExist) {
     let real
     try {
@@ -49,11 +137,26 @@ async function resolveInWorkspace(cwd, candidate, { mustExist = true } = {}) {
     } catch {
       throw new Error(`Path does not exist: ${candidate}`)
     }
-    const realRelative = path.relative(cwd, real)
-    if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
-      throw new Error(`Path resolves outside the session workspace: ${candidate}`)
-    }
+    if (!insideWorkspace(real)) throw outside()
     return real
+  }
+
+  const link = await fs.lstat(absolute).catch(() => null)
+  if (link) {
+    // A dangling link would make the write create its target, wherever it is.
+    const real = await fs.realpath(absolute).catch(() => null)
+    if (!real || !insideWorkspace(real)) throw outside()
+  }
+  let ancestor = path.dirname(absolute)
+  for (;;) {
+    const real = await fs.realpath(ancestor).catch(() => null)
+    if (real) {
+      if (!insideWorkspace(real)) throw outside()
+      break
+    }
+    const parent = path.dirname(ancestor)
+    if (parent === ancestor) break
+    ancestor = parent
   }
   return absolute
 }
@@ -174,6 +277,7 @@ export async function inspectTemplate({ cwd, template }) {
       if (entry.kind === 'text') layer.text = true
       if (entry.text) {
         layer.textContent = entry.text.value
+        layer.textAlign = entry.text.align
         layer.runCount = entry.text.runs.length
         if (entry.text.runs.length) {
           layer.runs = entry.text.runs.slice(0, 8)
@@ -213,12 +317,22 @@ export async function renderBatch({
   anchor = 'center',
   fill = 1,
   adjustments = {},
+  text,
+  textBySku,
+  fontDir,
   zip = false,
 }) {
   const absolute = await resolveInWorkspace(cwd, template)
   const doc = await loadTemplateDoc(absolute)
 
-  const slotIds = slots.length > 0 ? resolveSlots(doc, slots) : suggestSlots(doc)
+  // Explicit slots win; otherwise slots restored by load_project; otherwise
+  // the auto-detected ones.
+  const slotIds =
+    slots && slots.length > 0
+      ? resolveSlots(doc, slots)
+      : doc.pinnedSlots && doc.pinnedSlots.size
+        ? [...doc.pinnedSlots]
+        : suggestSlots(doc)
   if (slotIds.length === 0) {
     throw new Error(
       'No product slot was detected. Inspect the layer tree and pass one or more slot layer names.',
@@ -232,6 +346,42 @@ export async function renderBatch({
     throw new Error('No SKU images were found. Pass `skus` paths or a `skuDir` folder.')
   }
 
+  let fontsRegistered
+  let fontsSkipped
+  if (fontDir) {
+    const registration = await registerFonts(cwd, { dir: fontDir })
+    fontsRegistered = registration.registered
+    fontsSkipped = registration.skipped
+  }
+
+  // SKUs are grouped by their merged override set. Each group builds its
+  // scene once, renders all its SKUs, then frees the canvases before the next
+  // group starts, so 500 distinct prices hold one variant scene at a time
+  // instead of 500. Output names are still assigned in the input order.
+  const textWarnings = []
+  const savedEdits = doc.textEdits && doc.textEdits.size ? [...doc.textEdits.values()] : null
+  const groups = new Map()
+  const used = new Set()
+  const extensionFor = format === 'png' ? 'png' : 'jpg'
+  const jobs = skuFiles.map((file, index) => {
+    const base = path.basename(file, path.extname(file))
+    // psd_edit edits < batch `text` < `textBySku`, each winning per layer.
+    const overrides = mergeOverrideLists(
+      mergeOverrideLists(savedEdits, text),
+      textBySku ? (textBySku[path.basename(file)] ?? textBySku[base]) : undefined,
+    )
+    const signature = overrides ? JSON.stringify(overrides) : ''
+    let group = groups.get(signature)
+    if (!group) {
+      group = { overrides, jobs: [] }
+      groups.set(signature, group)
+    }
+    const job = { index, file, base, name: uniqueName(used, sanitizeName(base), extensionFor) }
+    group.jobs.push(job)
+    return job
+  })
+  const textVariants = [...groups.values()].filter((group) => group.overrides).length
+
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
   const relativeOut = outDir || path.join('out', 'psd-batch', `${sanitizeName(doc.name)}-${stamp}`)
   const absoluteOut = await resolveInWorkspace(cwd, relativeOut, { mustExist: false })
@@ -239,37 +389,47 @@ export async function renderBatch({
 
   const isPng = format === 'png'
   const mime = isPng ? 'image/png' : 'image/jpeg'
-  const extension = isPng ? 'png' : 'jpg'
   const settings = {
     mode: fit || DEFAULT_SETTINGS.mode,
     anchor: anchor || DEFAULT_SETTINGS.anchor,
     fill: Number.isFinite(Number(fill)) ? Number(fill) : DEFAULT_SETTINGS.fill,
   }
 
-  const used = new Set()
-  const files = []
-  const zipEntries = {}
+  const zipBuffers = zip ? new Array(jobs.length) : null
 
-  for (const file of skuFiles) {
-    const image = await loadImage(file)
-    const content = measureContent(image)
-    const base = path.basename(file, path.extname(file))
-    const adjust = toAdjustment(adjustments[path.basename(file)] ?? adjustments[base])
-
-    const canvas = createCanvas(doc.width, doc.height)
-    const ctx = canvas.getContext('2d')
-    if (!isPng) {
-      ctx.fillStyle = '#ffffff'
-      ctx.fillRect(0, 0, doc.width, doc.height)
+  for (const group of groups.values()) {
+    let scene = doc.scene
+    if (group.overrides) {
+      const clone = cloneDoc(doc)
+      textWarnings.push(...applyTextOverrides(clone, group.overrides, (family) => GlobalFonts.has(family)))
+      scene = buildScene(clone)
     }
-    drawScene(ctx, doc.scene, image, content, settings, adjust)
+    try {
+      for (const job of group.jobs) {
+        const image = await loadImage(job.file)
+        const content = measureContent(image)
+        const adjust = toAdjustment(adjustments[path.basename(job.file)] ?? adjustments[job.base])
 
-    const buffer = canvas.toBuffer(mime, isPng ? undefined : Math.round(quality))
-    const name = uniqueName(used, sanitizeName(base), extension)
-    await fs.writeFile(path.join(absoluteOut, name), buffer)
-    files.push(name)
-    if (zip) zipEntries[name] = new Uint8Array(buffer)
+        const canvas = createCanvas(doc.width, doc.height)
+        const ctx = canvas.getContext('2d')
+        if (!isPng) {
+          ctx.fillStyle = '#ffffff'
+          ctx.fillRect(0, 0, doc.width, doc.height)
+        }
+        drawScene(ctx, scene, image, content, settings, adjust)
+
+        const buffer = canvas.toBuffer(mime, isPng ? undefined : Math.round(quality))
+        await fs.writeFile(path.join(absoluteOut, job.name), buffer)
+        if (zipBuffers) zipBuffers[job.index] = new Uint8Array(buffer)
+      }
+    } finally {
+      if (scene !== doc.scene) disposeScene(scene)
+    }
   }
+
+  const files = jobs.map((job) => job.name)
+  const zipEntries = {}
+  if (zipBuffers) jobs.forEach((job) => { zipEntries[job.name] = zipBuffers[job.index] })
 
   let zipPath
   if (zip) {
@@ -291,6 +451,10 @@ export async function renderBatch({
     suppressed: doc.scene.suppressed.slice(0, 50),
     suppressedCount: doc.scene.suppressed.length,
     suppressedTruncated: doc.scene.suppressed.length > 50,
+    textVariants,
+    ...(fontsRegistered ? { fontsRegistered } : {}),
+    ...(fontsSkipped && fontsSkipped.length ? { fontsSkipped } : {}),
+    ...(textWarnings.length ? { textWarnings: [...new Set(textWarnings)] } : {}),
     ...(zipPath ? { zip: path.relative(cwd, zipPath) } : {}),
   }
 }
@@ -316,43 +480,21 @@ function findTextEntry(doc, spec) {
   return matches[0]
 }
 
-function normalizeColor(raw) {
-  if (Array.isArray(raw) && raw.length >= 3) {
-    return raw.slice(0, 3).map((value) => Math.max(0, Math.min(255, Math.round(Number(value) || 0))))
-  }
-  if (typeof raw === 'string') {
-    const hex = raw.replace('#', '')
-    if (/^[0-9a-f]{6}$/i.test(hex)) {
-      return [0, 2, 4].map((offset) => parseInt(hex.slice(offset, offset + 2), 16))
-    }
-  }
-  return null
-}
-
-/**
- * Normalise per-run styles.
- *
- * Callers speak pixels (`sizePx`), because that is what a design spec carries;
- * the repaint kernel converts back to points through the layer box.
- */
-function normalizeRuns(raw, fallback) {
-  if (!Array.isArray(raw) || raw.length === 0) return null
-  const runs = []
-  for (const item of raw) {
-    const length = Math.max(0, Math.round(Number(item && item.len)))
-    if (!length) continue
-    const run = { len: length }
-    if (item.family) run.family = String(item.family)
-    if (item.weight) run.weight = Number(item.weight)
-    if (item.sizePx) run.size = Number(item.sizePx)
-    else if (item.size) run.size = Number(item.size)
-    const color = normalizeColor(item.color)
-    if (color) run.color = color
-    if (item.tracking != null) run.tracking = Number(item.tracking)
-    runs.push({ ...fallback, ...run })
-  }
-  return runs.length ? runs : null
-}
+/** Fields a text override may carry; psd_edit and psd_batch_render share them. */
+const TEXT_OVERRIDE_FIELDS = [
+  'value',
+  'runs',
+  'font',
+  'weight',
+  'size',
+  'sizePx',
+  'color',
+  'tracking',
+  'align',
+  'leading',
+  'dx',
+  'dy',
+]
 
 /** Scale, rotate and return a canvas for a placed element. */
 function composeElement(image, { scale = 1, rotation = 0 } = {}) {
@@ -374,178 +516,170 @@ function composeElement(image, { scale = 1, rotation = 0 } = {}) {
   return canvas
 }
 
-async function registerFontFiles(cwd, { dir, paths }) {
-  const files = []
-  if (dir) {
-    const directory = await resolveInWorkspace(cwd, dir)
-    const entries = await fs.readdir(directory, { withFileTypes: true })
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (!entry.isFile()) continue
-      if (!/\.(ttf|otf|ttc|otc|woff2?)$/i.test(entry.name)) continue
-      files.push(path.join(directory, entry.name))
-    }
+async function loadElement(cwd, spec) {
+  const file = await resolveInWorkspace(cwd, spec.source)
+  const image = await loadImage(file)
+  const scale = Number(spec.scale) > 0 ? Number(spec.scale) : 1
+  const rotation = Number(spec.rotation) || 0
+  return {
+    name: spec.name ? String(spec.name) : path.basename(file, path.extname(file)),
+    source: path.relative(cwd, file),
+    canvas: composeElement(image, { scale, rotation }),
+    left: Number(spec.left) || 0,
+    top: Number(spec.top) || 0,
+    scale,
+    rotation,
+    opacity: spec.opacity == null ? 1 : Math.max(0, Math.min(1, Number(spec.opacity))),
+    blend: spec.blend || 'normal',
+    aboveSlots: spec.aboveSlots !== false,
   }
-  for (const item of paths || []) files.push(await resolveInWorkspace(cwd, item))
-  if (files.length === 0) throw new Error('Pass `dir` or `paths` with font files to register')
+}
 
-  const loaded = []
-  const failed = []
-  for (const file of files) {
-    const stem = path.basename(file, path.extname(file)).replace(/_+/g, ' ').replace(/\s+/g, ' ').trim()
-    const aliases = new Set([stem])
-    try {
-      const buffer = await fs.readFile(file)
-      const postScript = readFontPostScriptName(buffer)
-      if (postScript) aliases.add(postScript)
-    } catch { /* 读不到 name 表就只用文件名 */ }
-    let ok = false
-    for (const alias of aliases) {
-      try {
-        if (GlobalFonts.registerFromPath(file, alias)) {
-          markFontRegistered(alias)
-          ok = true
-        }
-      } catch (error) {
-        if (alias === stem) failed.push(`${alias}: ${String((error && error.message) || error).slice(0, 80)}`)
-      }
-    }
-    if (ok) loaded.push(...aliases)
-  }
-  return { loaded: [...new Set(loaded)], failed }
+function currentSlots(doc) {
+  return [...(doc.pinnedSlots && doc.pinnedSlots.size ? doc.pinnedSlots : doc.slots || [])]
 }
 
 function serializeProject(doc, template) {
-  const textEdits = {}
-  for (const [entryId, edit] of doc.textEdits || []) textEdits[entryId] = edit
   return {
-    version: 1,
+    version: 2,
     template,
-    slots: [...(doc.slots || [])],
-    textEdits,
-    elements: (doc.elements || []).map((element) => ({
-      name: element.name,
-      source: element.source,
-      left: element.left,
-      top: element.top,
-      scale: element.scale,
-      rotation: element.rotation,
-      opacity: element.opacity,
-      blend: element.blend,
-      aboveSlots: element.aboveSlots,
-    })),
-    fonts: registeredFonts(),
+    slots: currentSlots(doc),
+    textEdits: Object.fromEntries(doc.textEdits),
+    elements: doc.elements.map(({ canvas: _canvas, ...element }) => element),
+    fonts: [...registeredFamilies].sort(),
   }
 }
 
-async function applyProject(doc, cwd, project) {
-  doc.textEdits = new Map(Object.entries(project.textEdits || {}))
-  doc.elements = []
-  for (const element of project.elements || []) {
-    if (!element.source) continue
-    const file = await resolveInWorkspace(cwd, element.source)
-    const image = await loadImage(file)
-    doc.elements.push({
-      ...element,
-      canvas: composeElement(image, { scale: element.scale || 1, rotation: element.rotation || 0 }),
-    })
+/**
+ * Read a project into a fresh state without touching the document. Every
+ * slot, text layer and element source is validated and loaded first, so a
+ * missing asset fails the load instead of leaving half a project applied.
+ */
+async function readProject(doc, cwd, project) {
+  if (!project || typeof project !== 'object') throw new Error('Project file is not a JSON object')
+  const slots = Array.isArray(project.slots) ? project.slots.map(String) : []
+  for (const id of slots) {
+    if (!doc.leaves.some((leaf) => leaf.id === id)) throw new Error(`Project slot not in this template: ${id}`)
   }
-  if (Array.isArray(project.slots)) doc.slots = new Set(project.slots)
-  return doc
+  const textEdits = new Map()
+  for (const [key, raw] of Object.entries(project.textEdits || {})) {
+    const entry = findTextEntry(doc, key)
+    textEdits.set(entry.id, { ...pickOverride(raw), layer: entry.id })
+  }
+  const elements = []
+  for (const spec of project.elements || []) {
+    if (!spec || !spec.source) throw new Error('Project element without a `source` image')
+    try {
+      elements.push(await loadElement(cwd, spec))
+    } catch (error) {
+      throw new Error(`Project element ${spec.name || spec.source}: ${error.message || error}`)
+    }
+  }
+  return { slots, textEdits, elements }
+}
+
+function pickOverride(raw) {
+  const out = {}
+  for (const key of TEXT_OVERRIDE_FIELDS) if (raw && raw[key] != null) out[key] = raw[key]
+  return out
+}
+
+function missingFamilies(doc) {
+  return templateFamilies(doc).filter((family) => !GlobalFonts.has(family))
 }
 
 /**
  * Edit a template in place: copy, per-run styles, placed elements, fonts and
- * the project file. Everything lands on the cached document, so a following
- * psd_batch_render picks it up without re-parsing the PSD.
+ * the project file. Text edits are stored as overrides in the same shape as
+ * psd_batch_render's `text`, on the cached document, so the next render picks
+ * them up (its own `text`/`textBySku` still win per layer).
  */
 export async function editTemplate(options) {
   const { cwd, template, action } = options
   if (!action) throw new Error('An action is required')
   const absolute = await resolveInWorkspace(cwd, template)
   const doc = await loadTemplateDoc(absolute)
+  if (!doc.textEdits) doc.textEdits = new Map()
+  if (!doc.elements) doc.elements = []
 
   if (action === 'status') {
     return {
       template: path.relative(cwd, absolute) || template,
-      slots: [...(doc.slots || [])],
-      textEdits: [...(doc.textEdits || new Map()).keys()],
-      elements: (doc.elements || []).map((element) => element.name),
-      fonts: registeredFonts(),
+      slots: currentSlots(doc),
+      slotsPinned: !!(doc.pinnedSlots && doc.pinnedSlots.size),
+      textEdits: [...doc.textEdits.keys()],
+      elements: doc.elements.map((element) => element.name),
+      fonts: [...registeredFamilies].sort(),
       neededFonts: templateFamilies(doc),
-      missingFonts: unregisteredFamilies(doc),
+      missingFonts: missingFamilies(doc),
     }
   }
 
   if (action === 'text') {
     const entry = findTextEntry(doc, options.layer)
-    const edit = { ...(doc.textEdits.get(entry.id) || {}) }
-    if (options.text !== undefined) edit.value = String(options.text)
-    if (options.align) edit.align = String(options.align)
-    if (options.leading != null) edit.leading = Number(options.leading)
-    if (options.dx != null) edit.dx = Number(options.dx)
-    if (options.dy != null) edit.dy = Number(options.dy)
-    if (options.tracking != null) edit.tracking = Number(options.tracking)
-
-    const baseRun = {
-      family: options.family || entry.text.runs[0].family,
-      weight: Number(options.weight) || entry.text.runs[0].weight,
-      size: Number(options.sizePx) || entry.text.runs[0].size,
-      color: normalizeColor(options.color) || entry.text.runs[0].color,
-      tracking: options.tracking != null ? Number(options.tracking) : entry.text.runs[0].tracking,
+    const patch = pickOverride(options)
+    if (!Object.keys(patch).length) {
+      throw new Error(`Pass at least one of: ${TEXT_OVERRIDE_FIELDS.join(', ')}`)
     }
-    const runs = normalizeRuns(options.runs, baseRun)
-    if (runs) {
-      edit.runs = runs
-    } else if (options.family || options.sizePx || options.weight || options.color) {
-      // Whole-layer restyle keeps the original run split, so per-character
-      // colour or size differences survive a font swap.
-      edit.runs = entry.text.runs.map((run) => ({ ...run, ...baseRun }))
-    }
-    if (options.value !== undefined && !edit.runs) {
-      edit.runs = [{ len: String(options.text).length, ...baseRun }]
-    }
-
-    const missing = (edit.runs || entry.text.runs)
-      .map((run) => run.family)
-      .filter((family) => family && !registeredFonts().includes(family))
+    const edit = { ...(doc.textEdits.get(entry.id) || {}), ...patch, layer: entry.id }
+    // Dry run against the original geometry, so the reply shows what renders.
+    const leaf = doc.leaves.find((item) => item.id === entry.leafId)
+    const pxPerPt = leaf ? pxPerPtOf(entry.text, (leaf.__raster || leaf).height) : 0
+    const effective = mergeTextOverride(entry.text, edit, pxPerPt) || entry.text
     doc.textEdits.set(entry.id, edit)
+    const missing = [...new Set(effective.runs.map((run) => run.family).filter(Boolean))].filter(
+      (family) => !GlobalFonts.has(family),
+    )
     return {
       layer: entry.name,
       entryId: entry.id,
-      value: edit.value !== undefined ? edit.value : entry.text.value,
-      runs: (edit.runs || entry.text.runs).length,
-      warning: missing.length
-        ? `Font not registered, the canvas will fall back: ${[...new Set(missing)].join(', ')}`
-        : undefined,
+      value: effective.value,
+      runs: effective.runs.map((run) => ({
+        len: run.len,
+        family: run.family,
+        weight: run.weight,
+        size: run.size,
+        sizePx: Math.round(run.size * pxPerPt * 100) / 100,
+        color: run.color,
+      })),
+      ...(missing.length
+        ? { warning: `Font not registered, the canvas will fall back: ${missing.join(', ')}` }
+        : {}),
     }
   }
 
   if (action === 'element') {
-    const files = []
-    for (const item of options.paths || []) files.push(await resolveInWorkspace(cwd, item))
-    if (files.length === 0) throw new Error('Pass `paths` with one or more images')
-    const placed = []
-    for (const file of files) {
-      const image = await loadImage(file)
-      const scale = Number(options.scale) > 0 ? Number(options.scale) : 1
-      const rotation = Number(options.rotation) || 0
-      const canvas = composeElement(image, { scale, rotation })
-      const element = {
-        name: options.name ? String(options.name) : path.basename(file, path.extname(file)),
-        source: path.relative(cwd, file),
-        canvas,
-        left: Number(options.dx) || 0,
-        top: Number(options.dy) || 0,
-        scale,
-        rotation,
-        opacity: options.opacity == null ? 1 : Math.max(0, Math.min(1, Number(options.opacity))),
-        blend: options.blend || 'normal',
-        aboveSlots: options.aboveSlots !== false,
-      }
-      doc.elements.push(element)
-      placed.push({ name: element.name, left: element.left, top: element.top, w: canvas.width, h: canvas.height })
+    if (!Array.isArray(options.paths) || options.paths.length === 0) {
+      throw new Error('Pass `paths` with one or more images')
     }
-    return { placed, total: doc.elements.length }
+    const loaded = []
+    for (const source of options.paths) {
+      loaded.push(
+        await loadElement(cwd, {
+          source,
+          name: options.paths.length === 1 ? options.name : undefined,
+          left: options.dx,
+          top: options.dy,
+          scale: options.scale,
+          rotation: options.rotation,
+          opacity: options.opacity,
+          blend: options.blend,
+          aboveSlots: options.aboveSlots,
+        }),
+      )
+    }
+    doc.elements.push(...loaded)
+    return {
+      placed: loaded.map((element) => ({
+        name: element.name,
+        left: element.left,
+        top: element.top,
+        w: element.canvas.width,
+        h: element.canvas.height,
+        aboveSlots: element.aboveSlots,
+      })),
+      total: doc.elements.length,
+    }
   }
 
   if (action === 'remelement') {
@@ -553,17 +687,22 @@ export async function editTemplate(options) {
     if (names.length === 0) throw new Error('Pass `names` with the elements to remove')
     const before = doc.elements.length
     doc.elements = doc.elements.filter((element) => !names.includes(element.name))
-    const removed = before - doc.elements.length
-    return { removed, total: doc.elements.length, names: doc.elements.map((element) => element.name) }
+    return {
+      removed: before - doc.elements.length,
+      total: doc.elements.length,
+      names: doc.elements.map((element) => element.name),
+    }
   }
 
   if (action === 'fonts') {
-    // `paths` is what every other action uses; `fonts` reads better on its own.
-    const result = await registerFontFiles(cwd, { dir: options.dir, paths: options.paths || options.fonts })
+    const paths = options.fonts || options.paths
+    if (!options.dir && !(paths && paths.length)) throw new Error('Pass `dir` or `fonts` with font files to register')
+    const result = await registerFonts(cwd, { dir: options.dir, paths })
     return {
-      ...result,
-      registered: registeredFonts(),
-      missingFonts: unregisteredFamilies(doc),
+      loaded: result.registered,
+      skipped: result.skipped,
+      registered: [...registeredFamilies].sort(),
+      missingFonts: missingFamilies(doc),
     }
   }
 
@@ -571,31 +710,89 @@ export async function editTemplate(options) {
     if (!options.project) throw new Error('Pass `project` with the JSON path to write')
     const projectPath = await resolveInWorkspace(cwd, options.project, { mustExist: false })
     await fs.mkdir(path.dirname(projectPath), { recursive: true })
+    // Re-check after mkdir: the folder that now exists must still be ours.
+    await resolveInWorkspace(cwd, path.relative(cwd, projectPath), { mustExist: false })
     const data = serializeProject(doc, path.relative(cwd, absolute))
     await fs.writeFile(projectPath, JSON.stringify(data, null, 2))
-    return { project: path.relative(cwd, projectPath), textEdits: Object.keys(data.textEdits).length, elements: data.elements.length }
+    return {
+      project: path.relative(cwd, projectPath),
+      textEdits: Object.keys(data.textEdits).length,
+      elements: data.elements.length,
+      slots: data.slots,
+    }
   }
 
   if (action === 'load_project') {
     if (!options.project) throw new Error('Pass `project` with the JSON path to read')
     const projectPath = await resolveInWorkspace(cwd, options.project)
-    const project = JSON.parse(await fs.readFile(projectPath, 'utf8'))
-    await applyProject(doc, cwd, project)
+    let project
+    try {
+      project = JSON.parse(await fs.readFile(projectPath, 'utf8'))
+    } catch (error) {
+      throw new Error(`Project file is not valid JSON: ${error.message || error}`)
+    }
+    const next = await readProject(doc, cwd, project)
+    // Everything loaded: swap the whole state in one step.
+    doc.textEdits = next.textEdits
+    doc.elements = next.elements
+    doc.pinnedSlots = next.slots.length ? new Set(next.slots) : null
+    if (next.slots.length) doc.slots = new Set(next.slots)
     return {
       project: path.relative(cwd, projectPath),
       textEdits: doc.textEdits.size,
       elements: doc.elements.length,
-      slots: [...doc.slots],
+      slots: currentSlots(doc),
+      missingFonts: missingFamilies(doc),
     }
   }
 
   if (action === 'reset') {
     doc.textEdits = new Map()
     doc.elements = []
+    doc.pinnedSlots = null
     return { ok: true, textEdits: 0, elements: 0 }
   }
 
-  throw new Error(`Unknown action: ${action}. Use status / text / element / remelement / fonts / save_project / load_project / reset`)
+  throw new Error(
+    `Unknown action: ${action}. Use status / text / element / remelement / fonts / save_project / load_project / reset`,
+  )
+}
+
+const TEXT_RUN_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['len'],
+  properties: {
+    len: { type: 'integer', description: 'Character count of this run.' },
+    family: { type: 'string', description: 'Font family or PostScript name.' },
+    weight: { type: 'number', description: 'Font weight, 100-900.' },
+    size: { type: 'number', description: 'Font size in PSD points.' },
+    sizePx: { type: 'number', description: 'Font size in canvas pixels; wins over `size`.' },
+    color: { type: 'string', description: 'Fill colour as #rrggbb.' },
+    tracking: { type: 'number', description: 'Letter spacing in 1/1000 em, as in Photoshop.' },
+  },
+}
+
+/** One text override; psd_batch_render `text`/`textBySku` and psd_edit share it. */
+const TEXT_OVERRIDE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['layer'],
+  properties: {
+    layer: { type: 'string', description: 'Text layer name, entry id (e12) or leaf id (l3).' },
+    value: { type: 'string', description: 'New copy; characters keep their original styles.' },
+    runs: { type: 'array', items: TEXT_RUN_SCHEMA },
+    ...Object.fromEntries(
+      ['family', 'weight', 'size', 'sizePx', 'color', 'tracking'].map((key) => [
+        key === 'family' ? 'font' : key,
+        TEXT_RUN_SCHEMA.properties[key],
+      ]),
+    ),
+    align: { type: 'string', enum: ['left', 'center', 'right'], description: 'Paragraph alignment.' },
+    leading: { type: 'number', description: 'Fixed line height in PSD points.' },
+    dx: { type: 'number', description: 'Horizontal nudge in canvas pixels.' },
+    dy: { type: 'number', description: 'Vertical nudge in canvas pixels.' },
+  },
 }
 
 /**
@@ -648,6 +845,7 @@ export function registerTools(ctx) {
                   leafId: { type: 'string' },
                   bounds: { type: 'array', items: { type: 'integer' } },
                   textContent: { type: 'string' },
+                  textAlign: { type: 'string', enum: ['left', 'center', 'right'] },
                   runs: {
                     type: 'array',
                     items: {
@@ -707,7 +905,7 @@ export function registerTools(ctx) {
     ctx.tools.register({
       name: 'psd_batch_render',
       description:
-        'Render a PSD/PSB main-image template with many SKU images at once. Each SKU image is trimmed to its visible content, fitted into the product slots, composited between the template layers, and written as JPG/PNG into a workspace folder. Visible sibling layers that overlap a slot are suppressed together with the slot (reported as `suppressed`) so stale product art cannot show through. Returns the output folder and file names; optionally packs a ZIP.',
+        'Render a PSD/PSB main-image template with many SKU images at once. Each SKU image is trimmed to its visible content, fitted into the product slots, composited between the template layers, and written as JPG/PNG into a workspace folder. Visible sibling layers that overlap a slot are suppressed together with the slot (reported as `suppressed`) so stale product art cannot show through. Text layers can be rewritten per batch (`text`) or per SKU (`textBySku`) — re-rendered with real glyphs, not pasted pixels; register brand fonts first with `fontDir`. Returns the output folder and file names; optionally packs a ZIP.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -731,6 +929,23 @@ export function registerTools(ctx) {
             items: { type: 'string' },
             description:
               'Product slot layer names or leaf ids. Omit to use the auto-detected slots reported by psd_inspect.',
+          },
+          text: {
+            type: 'array',
+            description:
+              'Rewrite text layers in every render: [{layer, value, runs, font, weight, size, sizePx, color, tracking, align, leading, dx, dy}]. `layer` is a layer name or leaf id; `value` replaces the copy (styles follow their characters); `runs` [{len, family?, weight?, size?, sizePx?, color?, tracking?}] restyle consecutive segments from the first character; flat font/weight/size/sizePx/color/tracking restyle all runs. `size` is in pt, exactly what psd_inspect reports; `sizePx` is in canvas pixels; color is #rrggbb. Wins over psd_edit text edits for the same layer.',
+            items: TEXT_OVERRIDE_SCHEMA,
+          },
+          textBySku: {
+            type: 'object',
+            additionalProperties: { type: 'array', items: TEXT_OVERRIDE_SCHEMA },
+            description:
+              'Per-SKU text overrides keyed by SKU file name (with or without extension), same shape as `text`; entries win over `text` per layer. Use it to give every SKU its own price.',
+          },
+          fontDir: {
+            type: 'string',
+            description:
+              'Directory of .ttf/.otf font files to register before rendering. Registered family names (file stems) are returned in `fontsRegistered`.',
           },
           outDir: {
             type: 'string',
@@ -762,7 +977,7 @@ export function registerTools(ctx) {
         schema: {
           type: 'object',
           additionalProperties: false,
-          required: ['count', 'outDir', 'files', 'slots', 'suppressed', 'suppressedCount', 'suppressedTruncated'],
+          required: ['count', 'outDir', 'files', 'slots', 'suppressed', 'suppressedCount', 'suppressedTruncated', 'textVariants'],
           properties: {
             count: { type: 'integer' },
             outDir: { type: 'string' },
@@ -796,6 +1011,10 @@ export function registerTools(ctx) {
             },
             suppressedCount: { type: 'integer' },
             suppressedTruncated: { type: 'boolean' },
+            textVariants: { type: 'integer' },
+            textWarnings: { type: 'array', items: { type: 'string' } },
+            fontsRegistered: { type: 'array', items: { type: 'string' } },
+            fontsSkipped: { type: 'array', items: { type: 'string' } },
           },
         },
         render: (_args, value) => [
@@ -810,6 +1029,14 @@ export function registerTools(ctx) {
                     .join(', ')}${
                     value.suppressedTruncated ? ` (+${value.suppressedCount - value.suppressed.length} more)` : ''
                   }`
+                : ''
+            }${value.textVariants ? `\nText rewritten in ${value.textVariants} variant(s).` : ''}${
+              value.fontsRegistered && value.fontsRegistered.length
+                ? `\nFonts registered: ${value.fontsRegistered.join(', ')}`
+                : ''
+            }${
+              value.textWarnings && value.textWarnings.length
+                ? `\nText warnings: ${value.textWarnings.slice(0, 8).join('；')}`
                 : ''
             }${value.zip ? `\nZIP: ${value.zip}` : ''}`,
           },
@@ -831,6 +1058,9 @@ export function registerTools(ctx) {
           anchor: args.anchor,
           fill: args.fill,
           adjustments: args.adjustments,
+          text: args.text,
+          textBySku: args.textBySku,
+          fontDir: args.fontDir,
           zip: args.zip,
         })
       },
@@ -843,7 +1073,7 @@ export function registerTools(ctx) {
     ctx.tools.register({
       name: 'psd_edit',
       description:
-        'Edit a loaded PSD/PSB template before rendering: rewrite a text layer (whole layer or per-run styles, so a price line can mix two fonts and colours), place extra image layers on top of or below the product slot, register font files, and save or load the project so edits survive between sessions. Edits land on the cached document, so a following psd_batch_render uses them without re-parsing the PSD.',
+        'Edit a loaded PSD/PSB template before rendering: rewrite a text layer (same fields as one psd_batch_render `text` item, so a price line can mix two fonts, sizes and colours), place extra image layers above the product slot or between the background and the slot, register font files, and save or load the project so edits survive between sessions. Edits land on the cached document, so a following psd_batch_render uses them (its own `text`/`textBySku` still win per layer) and, after load_project, the project\'s slots when `slots` is omitted.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -868,44 +1098,14 @@ export function registerTools(ctx) {
             description:
               'status: current edits, fonts and missing fonts. text: rewrite a text layer. element / remelement: add or remove placed images. fonts: register font files. save_project / load_project: persist edits. reset: drop every edit.',
           },
+          // action=text: the same fields as one psd_batch_render `text` item.
+          ...TEXT_OVERRIDE_SCHEMA.properties,
           layer: {
             type: 'string',
             description: 'Text layer name, entry id (e12) or leaf id (l3). Required for action=text.',
           },
-          text: {
-            type: 'string',
-            description: 'New copy. Keep the run lengths in step when you also pass `runs`.',
-          },
-          runs: {
-            type: 'array',
-            description:
-              'Per-run styles, one entry per contiguous character group with its `len`. Use it when one line mixes fonts, sizes or colours, e.g. [{len:1},{len:1,sizePx:138,color:"#CC3046"},{len:2}]. Omitted fields inherit the layer base style.',
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                len: { type: 'number', description: 'Character count of this run.' },
-                family: { type: 'string', description: 'Font family to use for the run.' },
-                weight: { type: 'number', description: 'Font weight, 100-900.' },
-                sizePx: { type: 'number', description: 'Font size in canvas pixels.' },
-                color: { type: 'string', description: 'Fill colour as #rrggbb.' },
-                tracking: { type: 'number', description: 'Letter spacing in points.' },
-              },
-            },
-          },
-          family: { type: 'string', description: 'Restyle the whole layer with this font family.' },
-          weight: { type: 'number', description: 'Restyle the whole layer with this weight.' },
-          sizePx: { type: 'number', description: 'Restyle the whole layer with this size in canvas pixels.' },
-          color: { type: 'string', description: 'Restyle the whole layer with this fill colour (#rrggbb).' },
-          tracking: { type: 'number', description: 'Letter spacing, points.' },
-          align: {
-            type: 'string',
-            enum: ['left', 'center', 'right'],
-            description: 'Paragraph alignment for the repainted layer.',
-          },
-          leading: { type: 'number', description: 'Line height in points. Omit to keep the PSD value.' },
-          dx: { type: 'number', description: 'Horizontal nudge in canvas pixels.' },
-          dy: { type: 'number', description: 'Vertical nudge in canvas pixels.' },
+          dx: { type: 'number', description: 'Horizontal offset in canvas pixels (text nudge, or element left).' },
+          dy: { type: 'number', description: 'Vertical offset in canvas pixels (text nudge, or element top).' },
           paths: {
             type: 'array',
             description: 'Images to place (relative paths). Required for action=element.',
@@ -918,7 +1118,8 @@ export function registerTools(ctx) {
           blend: { type: 'string', description: 'Blend mode, e.g. multiply / screen / overlay.' },
           aboveSlots: {
             type: 'boolean',
-            description: 'Draw the element above the product slot (default true). Set false to sit under it.',
+            description:
+              'Draw the element above everything (default true). Set false to place it directly under the lowest product slot, above the background.',
           },
           names: {
             type: 'array',

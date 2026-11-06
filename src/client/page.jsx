@@ -22,25 +22,14 @@ import {
   zipFiles,
 } from '../core/export.js'
 import {
-  setFontFaceInstaller,
-  registerFont,
-  unregisteredFamilies,
+  applyTextOverrides,
+  restoreTextLeaf,
+  mergeTextOverride,
+  fontFamilyOf,
+  readFontPostScriptName,
 } from '../core/text.js'
 import { CSS } from './styles.js'
 import { Icon } from './icons.jsx'
-
-// Browser side of the font registry: a repainted text layer needs the real
-// face, and canvas falls back silently when the family is unknown, so the
-// page loads font files through FontFace before composing.
-setFontFaceInstaller(async (family, source) => {
-  const url = typeof source === 'string' ? source : URL.createObjectURL(source)
-  const response = await fetch(url)
-  const buffer = await response.arrayBuffer()
-  const face = new FontFace(family, buffer)
-  await face.load()
-  document.fonts.add(face)
-  return true
-})
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
 
@@ -66,6 +55,7 @@ const cache = {
   view: { zoom: 1, panX: 0, panY: 0 },
   format: 'jpeg',
   showSlots: true,
+  textEdits: {},
 }
 
 function roundRect(ctx, x, y, width, height, radius) {
@@ -117,6 +107,113 @@ function hitTestProduct(doc, item, bitmap, content, settings, point, view) {
   return null
 }
 
+/**
+ * One editable text layer: value input plus an advanced runs editor whose JSON
+ * shape matches the psd_batch_render `text` parameter.
+ */
+function TextRow({ entry, edit, onCommit, onRemove, t }) {
+  const base = entry.text
+  const [value, setValue] = React.useState(edit?.value ?? '')
+  const [runsOpen, setRunsOpen] = React.useState(false)
+  const [runsDraft, setRunsDraft] = React.useState('')
+
+  const effective = React.useMemo(() => {
+    if (!edit) return base
+    const override = {}
+    if (edit.value != null && edit.value !== '') override.value = edit.value
+    if (edit.runsRaw != null && edit.runsRaw.trim()) {
+      try {
+        const runs = JSON.parse(edit.runsRaw)
+        if (Array.isArray(runs)) override.runs = runs
+      } catch {
+        /* invalid drafts fall back to the base styles for the badge */
+      }
+    }
+    return mergeTextOverride(base, override) || base
+  }, [base, edit])
+
+  const missingFonts = React.useMemo(() => {
+    const seen = new Set()
+    const missing = []
+    for (const run of effective.runs || []) {
+      if (!run.family || seen.has(run.family)) continue
+      seen.add(run.family)
+      try {
+        if (!document.fonts.check(`400 16px "${run.family}"`)) missing.push(run.family)
+      } catch {
+        /* assume available when the probe is unsupported */
+      }
+    }
+    return missing
+  }, [effective])
+
+  return (
+    <div className="psb-text-row">
+      <div className="psb-text-line">
+        <span className="psb-text-name" title={entry.name}>
+          {entry.name}
+        </span>
+        {missingFonts.length ? (
+          <span
+            className="psb-text-warn"
+            title={t('text.fontMissing', { fonts: missingFonts.join(', ') })}
+          >
+            ⚠
+          </span>
+        ) : null}
+        <button
+          className={`psb-icon-btn ${edit?.runsRaw ? 'on' : ''}`}
+          onClick={() => {
+            if (!runsOpen) setRunsDraft(edit?.runsRaw ?? '')
+            setRunsOpen((open) => !open)
+          }}
+          title={t('panel.textRuns')}
+        >
+          {'{}'}
+        </button>
+        <button className="psb-icon-btn" onClick={onRemove} title={t('action.reset')}>
+          ↺
+        </button>
+      </div>
+      <input
+        className="psb-text-input"
+        value={value}
+        placeholder={base.value}
+        title={base.value}
+        onChange={(event) => setValue(event.target.value)}
+        onBlur={() => {
+          if (value !== (edit?.value ?? '')) onCommit({ value })
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') event.target.blur()
+        }}
+      />
+      {runsOpen ? (
+        <div className="psb-text-runs">
+          <textarea
+            className="psb-text-runs-input"
+            rows={3}
+            value={runsDraft}
+            placeholder={JSON.stringify(
+              (base.runs || []).map(({ len, family, weight, size }) => ({ len, family, weight, size })),
+            )}
+            onChange={(event) => setRunsDraft(event.target.value)}
+          />
+          <button
+            className="psb-btn ghost small"
+            onClick={() => {
+              onCommit({ runsRaw: runsDraft })
+              setRunsOpen(false)
+            }}
+          >
+            {t('action.applyRuns')}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 export function createStudio(ctx, t) {
   return function StudioPage() {
     const localeRevision = React.useSyncExternalStore(
@@ -132,6 +229,7 @@ export function createStudio(ctx, t) {
     const [view, setView] = React.useState(cache.view)
     const [format, setFormat] = React.useState(cache.format)
     const [showSlots, setShowSlots] = React.useState(cache.showSlots)
+    const [textEdits, setTextEdits] = React.useState(cache.textEdits)
 
     const [size, setSize] = React.useState({ w: 0, h: 0 })
     const [bitmap, setBitmap] = React.useState(null)
@@ -144,8 +242,8 @@ export function createStudio(ctx, t) {
     const wrapRef = React.useRef(null)
     const canvasRef = React.useRef(null)
     const psdInputRef = React.useRef(null)
+    const imgInputRef = React.useRef(null)
     const fontInputRef = React.useRef(null)
-  const imgInputRef = React.useRef(null)
     const dragRef = React.useRef(null)
     const viewRef = React.useRef({ scale: 1, ox: 0, oy: 0, base: 1, w: 0, h: 0 })
     const cancelRef = React.useRef(false)
@@ -161,7 +259,8 @@ export function createStudio(ctx, t) {
       cache.view = view
       cache.format = format
       cache.showSlots = showSlots
-    }, [doc, items, selectedId, settings, view, format, showSlots])
+      cache.textEdits = textEdits
+    }, [doc, items, selectedId, settings, view, format, showSlots, textEdits])
 
     // Dispose the previous composite when a new one replaces it.
     React.useEffect(() => {
@@ -396,41 +495,6 @@ export function createStudio(ctx, t) {
       [selectedId],
     )
 
-    const loadFonts = React.useCallback(
-      async (files) => {
-        const list = Array.from(files || []).filter((file) =>
-          /\.(ttf|otf|ttc|otc|woff2?)$/i.test(file.name),
-        )
-        if (list.length === 0) {
-          setToast({ type: 'error', text: t('toast.notFont') })
-          return
-        }
-        let loaded = 0
-        const failed = []
-        for (const file of list) {
-          const family = file.name.replace(/\.[^.]+$/, '').replace(/_+/g, ' ').trim()
-          try {
-            await registerFont(family, file)
-            loaded += 1
-          } catch (error) {
-            failed.push(`${family}: ${String((error && error.message) || error).slice(0, 60)}`)
-          }
-        }
-        if (loaded) {
-          setToast({ type: 'ok', text: t('toast.fontsLoaded', { n: loaded }) })
-          setDoc((previous) => {
-            if (!previous) return previous
-            const next = { ...previous }
-            next.scene = buildScene(next)
-            return next
-          })
-        } else {
-          setToast({ type: 'error', text: failed[0] || t('toast.notFont') })
-        }
-      },
-      [t],
-    )
-
     const loadTemplate = React.useCallback(
       async (file) => {
         if (!file) return
@@ -445,25 +509,18 @@ export function createStudio(ctx, t) {
           await new Promise((resolve) => setTimeout(resolve, 24))
           next.slots = new Set(suggestSlots(next))
           next.scene = buildScene(next)
-          const missing = unregisteredFamilies(next)
           setDoc(next)
+          setTextEdits({})
           setQuery('')
           setView({ zoom: 1, panX: 0, panY: 0 })
-          setToast(
-            missing.length
-              ? {
-                  type: 'error',
-                  text: t('toast.fontsMissing', { list: missing.join(', ') }),
-                }
-              : {
-                  type: 'ok',
-                  text: t('toast.templateLoaded', {
-                    w: next.width,
-                    h: next.height,
-                    layers: next.leaves.length,
-                  }),
-                },
-          )
+          setToast({
+            type: 'ok',
+            text: t('toast.templateLoaded', {
+              w: next.width,
+              h: next.height,
+              layers: next.leaves.length,
+            }),
+          })
         } catch (error) {
           setToast({
             type: 'error',
@@ -547,6 +604,135 @@ export function createStudio(ctx, t) {
       applyDoc({ ...doc, slots })
       setToast({ type: 'ok', text: t('toast.slotsDetected', { count: slots.size }) })
     }, [doc, applyDoc, t])
+
+    const fontAvailable = React.useCallback((family) => {
+      try {
+        return document.fonts.check(`400 16px "${family}"`)
+      } catch {
+        return true
+      }
+    }, [])
+
+    const textEntries = React.useMemo(
+      () => (doc ? doc.entries.filter((entry) => entry.text && entry.leafId) : []),
+      [doc],
+    )
+
+    // Re-render overridden text layers with live glyphs. Leaves keep their
+    // raster under __raster, so every commit starts from the pristine pixels.
+    const commitTextEdits = React.useCallback(
+      (nextEdits) => {
+        if (!doc) return
+        const overrides = []
+        for (const [entryId, edit] of Object.entries(nextEdits)) {
+          const entry = doc.entries.find((item) => item.id === entryId)
+          if (!entry?.text) continue
+          const override = { layer: entryId }
+          if (edit.value != null && edit.value !== '' && edit.value !== entry.text.value) {
+            override.value = edit.value
+          }
+          if (edit.runsRaw != null && edit.runsRaw.trim()) {
+            let runs
+            try {
+              runs = JSON.parse(edit.runsRaw)
+            } catch {
+              setToast({ type: 'error', text: t('toast.runsInvalid') })
+              return
+            }
+            if (!Array.isArray(runs)) {
+              setToast({ type: 'error', text: t('toast.runsInvalid') })
+              return
+            }
+            override.runs = runs
+          }
+          // Push even when nothing changed: an empty override restores the
+          // raster, so editing back to the original undoes the rewrite.
+          overrides.push(override)
+        }
+        setTextEdits(nextEdits)
+        const warnings = applyTextOverrides(doc, overrides, fontAvailable)
+        applyDoc({ ...doc })
+        if (warnings.length) {
+          setToast({ type: 'error', text: t('toast.textWarn', { count: warnings.length }) })
+        }
+      },
+      [doc, applyDoc, fontAvailable, t],
+    )
+
+    const resetTextEntry = React.useCallback(
+      (entryId) => {
+        if (!doc) return
+        const next = { ...textEdits }
+        delete next[entryId]
+        setTextEdits(next)
+        const entry = doc.entries.find((item) => item.id === entryId)
+        const leaf = entry?.leafId ? doc.leaves.find((item) => item.id === entry.leafId) : null
+        if (leaf) restoreTextLeaf(leaf)
+        applyDoc({ ...doc })
+      },
+      [doc, textEdits, applyDoc],
+    )
+
+    const resetAllText = React.useCallback(() => {
+      if (!doc) return
+      setTextEdits({})
+      for (const entry of textEntries) {
+        const leaf = doc.leaves.find((item) => item.id === entry.leafId)
+        if (leaf) restoreTextLeaf(leaf)
+      }
+      applyDoc({ ...doc })
+    }, [doc, textEntries, applyDoc])
+
+    const loadFontFiles = React.useCallback(
+      async (fileList) => {
+        const files = Array.from(fileList || []).filter((file) => /\.(ttf|otf|ttc|woff2?)$/i.test(file.name))
+        if (!files.length) {
+          setToast({ type: 'error', text: t('toast.notFont') })
+          return
+        }
+        let loaded = 0
+        for (const file of files) {
+          const match = file.name.match(/\.(ttf|otf|ttc|woff2?)$/i)
+          const alias = file.name.slice(0, file.name.length - match[0].length).replace(/_+/g, ' ').trim() || 'font'
+          try {
+            const buffer = await file.arrayBuffer()
+            const face = new FontFace(alias, buffer)
+            await face.load()
+            document.fonts.add(face)
+            loaded += 1
+            // PSD styles name fonts by PostScript name, the file may be named
+            // anything: register the name table's PostScript name and the
+            // mapped system family as aliases too.
+            const aliases = new Set()
+            const postScript = readFontPostScriptName(buffer)
+            if (postScript) aliases.add(postScript)
+            for (const name of [alias, postScript]) {
+              const mapped = name && fontFamilyOf(name)
+              if (mapped) aliases.add(mapped)
+            }
+            aliases.delete(alias)
+            for (const name of aliases) {
+              try {
+                const alt = new FontFace(name, buffer.slice(0))
+                await alt.load()
+                document.fonts.add(alt)
+              } catch {
+                /* the alias may collide with a system family */
+              }
+            }
+          } catch {
+            /* skip unreadable font files */
+          }
+        }
+        if (loaded) {
+          setToast({ type: 'ok', text: t('toast.fontsLoaded', { count: loaded }) })
+          if (Object.keys(textEdits).length) commitTextEdits(textEdits)
+        } else {
+          setToast({ type: 'error', text: t('toast.notFont') })
+        }
+      },
+      [textEdits, commitTextEdits, t],
+    )
 
     const resetView = React.useCallback(() => setView({ zoom: 1, panX: 0, panY: 0 }), [])
 
@@ -757,8 +943,13 @@ export function createStudio(ctx, t) {
           const files = Array.from(event.dataTransfer.files || [])
           const psd = files.find((file) => /\.(psd|psb)$/i.test(file.name))
           if (psd) loadTemplate(psd)
+          const fonts = files.filter((file) => /\.(ttf|otf|ttc|woff2?)$/i.test(file.name))
+          if (fonts.length) loadFontFiles(fonts)
           const images = files.filter(
-            (file) => !/\.(psd|psb)$/i.test(file.name) && /^image\//.test(file.type),
+            (file) =>
+              !/\.(psd|psb)$/i.test(file.name) &&
+              !/\.(ttf|otf|ttc|woff2?)$/i.test(file.name) &&
+              /^image\//.test(file.type),
           )
           if (images.length) addSkus(images)
         }}
@@ -797,14 +988,6 @@ export function createStudio(ctx, t) {
               if (files.length) addSkus(files)
             }}
           />
-          <button className="psb-btn" onClick={() => psdInputRef.current?.click()}>
-            <Icon name="image" size={14} />
-            {t('action.loadTemplate')}
-          </button>
-          <button className="psb-btn" onClick={() => imgInputRef.current?.click()}>
-            <Icon name="plus" size={14} />
-            {t('action.addSkus')}
-          </button>
           <input
             ref={fontInputRef}
             type="file"
@@ -814,12 +997,16 @@ export function createStudio(ctx, t) {
             onChange={(event) => {
               const files = Array.from(event.target.files || [])
               event.target.value = ''
-              if (files.length) loadFonts(files)
+              loadFontFiles(files)
             }}
           />
-          <button className="psb-btn" onClick={() => fontInputRef.current?.click()}>
-            <Icon name="wand" size={14} />
-            {t('action.loadFonts')}
+          <button className="psb-btn" onClick={() => psdInputRef.current?.click()}>
+            <Icon name="image" size={14} />
+            {t('action.loadTemplate')}
+          </button>
+          <button className="psb-btn" onClick={() => imgInputRef.current?.click()}>
+            <Icon name="plus" size={14} />
+            {t('action.addSkus')}
           </button>
           <select
             className="psb-select"
@@ -906,6 +1093,43 @@ export function createStudio(ctx, t) {
                   })}
                 </div>
                 <div className="psb-layers-hint">{t('panel.layersHint')}</div>
+                <div className="psb-textpanel">
+                  <div className="psb-text-head">
+                    {t('panel.text')}
+                    <span className="psb-count">{textEntries.length}</span>
+                    <div className="psb-head-spacer" />
+                    {Object.keys(textEdits).length ? (
+                      <button className="psb-btn ghost small" onClick={resetAllText}>
+                        {t('action.reset')}
+                      </button>
+                    ) : null}
+                    <button
+                      className="psb-btn ghost small"
+                      onClick={() => fontInputRef.current?.click()}
+                    >
+                      {t('action.loadFonts')}
+                    </button>
+                  </div>
+                  {textEntries.length === 0 ? (
+                    <div className="psb-placeholder">{t('panel.textEmpty')}</div>
+                  ) : (
+                    textEntries.map((entry) => (
+                      <TextRow
+                        key={entry.id}
+                        entry={entry}
+                        edit={textEdits[entry.id]}
+                        onCommit={(patch) =>
+                          commitTextEdits({
+                            ...textEdits,
+                            [entry.id]: { ...textEdits[entry.id], ...patch },
+                          })
+                        }
+                        onRemove={() => resetTextEntry(entry.id)}
+                        t={t}
+                      />
+                    ))
+                  )}
+                </div>
               </>
             ) : (
               <div className="psb-placeholder">{t('panel.noTemplate')}</div>

@@ -6119,7 +6119,7 @@ var require_descriptor = __commonJS({
       if (fx.overprint !== void 0)
         stroke.overprint = fx.overprint;
       if (fx["Clr "])
-        stroke.color = parseColor(fx["Clr "]);
+        stroke.color = parseColor2(fx["Clr "]);
       if (fx.Grad)
         stroke.gradient = parseGradientContent(fx);
       if (fx.Ptrn)
@@ -6424,13 +6424,13 @@ var require_descriptor = __commonJS({
             result.reverse = !!val;
             break;
           case "Clr ":
-            result.color = parseColor(val);
+            result.color = parseColor2(val);
             break;
           case "hglC":
-            result.highlightColor = parseColor(val);
+            result.highlightColor = parseColor2(val);
             break;
           case "sdwC":
-            result.shadowColor = parseColor(val);
+            result.shadowColor = parseColor2(val);
             break;
           case "Styl":
             result.position = exports.FStl.decode(val);
@@ -6709,7 +6709,7 @@ var require_descriptor = __commonJS({
           smoothness: grad.Intr / 4096,
           colorStops: grad.Clrs.map(function(s) {
             return {
-              color: parseColor(s["Clr "]),
+              color: parseColor2(s["Clr "]),
               location: s.Lctn / samples_1,
               midpoint: s.Mdpn / 100
             };
@@ -6824,7 +6824,7 @@ var require_descriptor = __commonJS({
       } else if ("Ptrn" in descriptor) {
         return __assign({ type: "pattern" }, parsePatternContent(descriptor));
       } else if ("Clr " in descriptor) {
-        return { type: "color", color: parseColor(descriptor["Clr "]) };
+        return { type: "color", color: parseColor2(descriptor["Clr "]) };
       } else {
         throw new Error("Invalid vector content");
       }
@@ -6877,7 +6877,7 @@ var require_descriptor = __commonJS({
       }
     }
     exports.serializeVectorContent = serializeVectorContent;
-    function parseColor(color) {
+    function parseColor2(color) {
       if ("H   " in color) {
         return { h: parsePercentOrAngle(color["H   "]), s: color.Strt, b: color.Brgh };
       } else if ("Rd  " in color) {
@@ -6894,7 +6894,7 @@ var require_descriptor = __commonJS({
         throw new Error("Unsupported color descriptor");
       }
     }
-    exports.parseColor = parseColor;
+    exports.parseColor = parseColor2;
     function serializeColor(color) {
       if (!color) {
         return { _name: "", _classID: "RGBC", "Rd  ": 0, "Grn ": 0, "Bl  ": 0 };
@@ -16387,156 +16387,46 @@ function createCanvas(width, height) {
 var import_ag_psd = __toESM(require_dist(), 1);
 
 // src/core/text.js
-var registered = /* @__PURE__ */ new Set();
-var fontFaceInstaller = null;
-function setFontFaceInstaller(installer) {
-  fontFaceInstaller = installer;
-}
-function markFontRegistered(family) {
-  const name = String(family || "").trim();
-  if (name) registered.add(name);
-}
-function registeredFonts() {
-  return [...registered].sort();
-}
-function templateFamilies(doc) {
-  const families = /* @__PURE__ */ new Set();
-  for (const entry of doc.entries || []) {
-    if (!entry.text) continue;
-    for (const run of entry.text.runs || []) {
-      if (run.family) families.add(run.family);
-    }
+var FONT_FAMILY_MAP = [
+  [/^PingFangSC/i, "PingFang SC"],
+  [/^PingFang/i, "PingFang SC"],
+  [/^HiraginoSansGB/i, "Hiragino Sans GB"],
+  [/^MicrosoftYaHei/i, "Microsoft YaHei"],
+  [/^MicrosoftJhengHei/i, "Microsoft JhengHei"],
+  [/^(SourceHanSans|SourceHanSansCN|NotoSansSC|NotoSansCJK)/i, "Noto Sans SC"],
+  [/^SourceHanSerif/i, "Noto Serif SC"],
+  [/^SimHei|^STHeiti/i, "Heiti SC"],
+  [/^SimSun|^STSong/i, "Songti SC"],
+  [/^AlibabaPuHuiTi/i, "Alibaba PuHuiTi"],
+  [/^OPPOSans/i, "OPPO Sans"],
+  [/^HarmonyOS/i, "HarmonyOS Sans"],
+  [/^DIN/i, "DIN Alternate"],
+  [/^ArialMT|^Arial/i, "Arial"],
+  [/^HelveticaNeue|^Helvetica/i, "Helvetica Neue"],
+  [/^Inter/i, "Inter"],
+  [/^Roboto/i, "Roboto"]
+];
+function fontFamilyOf(name) {
+  const raw = String(name || "").replace(/^#/, "").trim();
+  if (!raw) return null;
+  for (const [pattern, family] of FONT_FAMILY_MAP) {
+    if (pattern.test(raw)) return family;
   }
-  return [...families].sort();
-}
-function unregisteredFamilies(doc) {
-  return templateFamilies(doc).filter((family) => !registered.has(family));
-}
-function cssFont(style, sizePx) {
-  const weight = style.weight || 400;
-  const italic = style.italic ? "italic " : "";
-  const family = String(style.family || "PingFang SC").replace(/"/g, '\\"');
-  return `${italic}${weight} ${Math.max(1, sizePx)}px "${family}"`;
-}
-function textMetrics(entry) {
-  const bounds = entry.bounds || [0, 0, 0, 0];
-  const box = {
-    x: bounds[0],
-    y: bounds[1],
-    w: Math.max(1, bounds[2] - bounds[0]),
-    h: Math.max(1, bounds[3] - bounds[1])
-  };
-  const value = entry.text && typeof entry.text.value === "string" ? entry.text.value : "";
-  const lines = Math.max(1, value.split("\n").length);
-  const runs = entry.text && entry.text.runs || [];
-  const maxPt = Math.max(1, ...runs.map((run) => run.size || 0), 1);
-  const pxPerPt = box.h / (lines * maxPt * 1.2);
-  return { box, lines, maxPt, pxPerPt };
-}
-function styleAt(runs, index) {
-  let accumulated = 0;
-  for (const run of runs) {
-    accumulated += run.len || 0;
-    if (index < accumulated) return run;
-  }
-  return runs.length ? runs[runs.length - 1] : null;
-}
-function chunkLine(line, offset, runs, fallback) {
-  const chunks = [];
-  for (let index = 0; index < line.length; index += 1) {
-    const style = styleAt(runs, offset + index) || fallback;
-    const last = chunks[chunks.length - 1];
-    if (last && last.style === style) last.text += line[index];
-    else chunks.push({ style, text: line[index] });
-  }
-  return chunks;
-}
-function measureChunk(ctx, chunk, pxPerPt, tracking) {
-  const size = Math.max(1, (chunk.style.size || 12) * pxPerPt);
-  ctx.font = cssFont(chunk.style, size);
-  const spacing = (chunk.style.tracking || tracking || 0) * pxPerPt;
-  if (!spacing) return ctx.measureText(chunk.text).width;
-  let width = 0;
-  for (const char of chunk.text) width += ctx.measureText(char).width + spacing;
-  return width;
-}
-function drawChunk(ctx, chunk, x, baseline, pxPerPt, tracking) {
-  const size = Math.max(1, (chunk.style.size || 12) * pxPerPt);
-  ctx.font = cssFont(chunk.style, size);
-  const color = chunk.style.color || [0, 0, 0];
-  ctx.fillStyle = `rgb(${color[0]}, ${color[1]}, ${color[2]})`;
-  const spacing = (chunk.style.tracking || tracking || 0) * pxPerPt;
-  if (!spacing) {
-    ctx.fillText(chunk.text, x, baseline);
-    return;
-  }
-  let cursor = x;
-  for (const char of chunk.text) {
-    ctx.fillText(char, cursor, baseline);
-    cursor += ctx.measureText(char).width + spacing;
-  }
-}
-var ALIGN_TO_ANCHOR = { left: "left", start: "left", center: "center", right: "right", end: "right", justify: "left" };
-function renderTextEntry(entry, options = {}) {
-  const text = entry.text || { value: "", runs: [] };
-  const runs = text.runs || [];
-  const meta = textMetrics(entry);
-  const value = String(text.value || "");
-  const lines = value.split("\n");
-  const canvas = createCanvas(Math.max(1, Math.ceil(meta.box.w)), Math.max(1, Math.ceil(meta.box.h)));
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return { canvas, left: meta.box.x, top: meta.box.y };
-  const align = String(options.align || text.align || "left").toLowerCase();
-  const anchor = ALIGN_TO_ANCHOR[align] || "left";
-  const tracking = typeof options.tracking === "number" ? options.tracking : 0;
-  const lineHeight = meta.maxPt * meta.pxPerPt * (typeof text.leading === "number" && text.leading > 0 ? Math.max(1, text.leading / meta.maxPt) : 1.2);
-  const fallback = runs[0] || { size: meta.maxPt, family: "PingFang SC", weight: 400, color: [0, 0, 0] };
-  ctx.textBaseline = "alphabetic";
-  ctx.textAlign = "left";
-  let offset = 0;
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const chunks = chunkLine(line, offset, runs, fallback);
-    offset += line.length + 1;
-    const widths = chunks.map((chunk) => measureChunk(ctx, chunk, meta.pxPerPt, tracking));
-    const total = widths.reduce((sum, width) => sum + width, 0);
-    let cursor = anchor === "center" ? (meta.box.w - total) / 2 : anchor === "right" ? meta.box.w - total : 0;
-    const baseline = lineHeight * (index + 0.82);
-    for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
-      drawChunk(ctx, chunks[chunkIndex], cursor, baseline, meta.pxPerPt, tracking);
-      cursor += widths[chunkIndex];
-    }
-  }
-  return { canvas, left: meta.box.x, top: meta.box.y };
+  return raw;
 }
 function readFontPostScriptName(buffer) {
   try {
-    const view = new DataView(buffer.buffer ? buffer.buffer : buffer, buffer.byteOffset || 0, buffer.byteLength);
-    const tagAt = (offset) => String.fromCharCode(
-      view.getUint8(offset),
-      view.getUint8(offset + 1),
-      view.getUint8(offset + 2),
-      view.getUint8(offset + 3)
-    );
+    const bytes = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : buffer;
+    const view = new DataView(bytes.buffer, bytes.byteOffset || 0, bytes.byteLength);
+    const tagAt = (offset) => String.fromCharCode(view.getUint8(offset), view.getUint8(offset + 1), view.getUint8(offset + 2), view.getUint8(offset + 3));
+    const fontStart = tagAt(0) === "ttcf" ? view.getUint32(12) : 0;
+    const tables = view.getUint16(fontStart + 4);
     let nameOffset = 0;
-    if (tagAt(0) === "ttcf") {
-      const first = view.getUint32(12);
-      const count2 = view.getUint16(first + 4);
-      for (let index = 0; index < count2; index += 1) {
-        const record = first + 12 + index * 16;
-        if (tagAt(record) === "name") {
-          nameOffset = view.getUint32(record + 8);
-          break;
-        }
-      }
-    } else {
-      const count2 = view.getUint16(4);
-      for (let index = 0; index < count2; index += 1) {
-        const record = 12 + index * 16;
-        if (tagAt(record) === "name") {
-          nameOffset = view.getUint32(record + 8);
-          break;
-        }
+    for (let index = 0; index < tables; index += 1) {
+      const record = fontStart + 12 + index * 16;
+      if (tagAt(record) === "name") {
+        nameOffset = view.getUint32(record + 8);
+        break;
       }
     }
     if (!nameOffset) return null;
@@ -16544,20 +16434,15 @@ function readFontPostScriptName(buffer) {
     const stringsStart = nameOffset + view.getUint16(nameOffset + 4);
     for (let index = 0; index < count; index += 1) {
       const record = nameOffset + 6 + index * 12;
+      if (view.getUint16(record + 6) !== 6) continue;
       const platformId = view.getUint16(record);
-      const nameId = view.getUint16(record + 6);
-      if (nameId !== 6) continue;
       const length = view.getUint16(record + 8);
-      const offset = view.getUint16(record + 10);
+      const start = stringsStart + view.getUint16(record + 10);
       let value = "";
       if (platformId === 3 || platformId === 0) {
-        for (let cursor = 0; cursor < length; cursor += 2) {
-          value += String.fromCharCode(view.getUint16(stringsStart + offset + cursor));
-        }
+        for (let cursor = 0; cursor + 1 < length; cursor += 2) value += String.fromCharCode(view.getUint16(start + cursor));
       } else {
-        for (let cursor = 0; cursor < length; cursor += 1) {
-          value += String.fromCharCode(view.getUint8(stringsStart + offset + cursor));
-        }
+        for (let cursor = 0; cursor < length; cursor += 1) value += String.fromCharCode(view.getUint8(start + cursor));
       }
       value = value.trim();
       if (value) return value;
@@ -16566,6 +16451,410 @@ function readFontPostScriptName(buffer) {
     return null;
   }
   return null;
+}
+function fontWeightOf(name, fauxBold) {
+  const raw = String(name || "").toLowerCase();
+  if (/heavy|black|extrabold|ultrabold/.test(raw)) return 800;
+  if (/semibold|demibold|bold/.test(raw)) return 700;
+  if (/medium/.test(raw)) return 500;
+  if (/light|thin/.test(raw)) return 300;
+  return fauxBold ? 700 : 400;
+}
+function fillColorOf(fill) {
+  if (!fill) return [0, 0, 0];
+  if (fill.r != null) {
+    return [Math.round(fill.r ?? 0), Math.round(fill.g ?? 0), Math.round(fill.b ?? 0)];
+  }
+  if (fill.k != null && fill.c == null) {
+    const value = Math.round(fill.k);
+    return [value, value, value];
+  }
+  if (fill.c != null) {
+    const c = (fill.c ?? 0) / 255;
+    const m = (fill.m ?? 0) / 255;
+    const y = (fill.y ?? 0) / 255;
+    const k = (fill.k ?? 0) / 255;
+    return [
+      Math.round(255 * (1 - c) * (1 - k)),
+      Math.round(255 * (1 - m) * (1 - k)),
+      Math.round(255 * (1 - y) * (1 - k))
+    ];
+  }
+  return [0, 0, 0];
+}
+function parseColor(input) {
+  if (Array.isArray(input)) return [input[0] | 0, input[1] | 0, input[2] | 0];
+  const hex = String(input || "").replace(/^#/, "");
+  const value = parseInt(hex, 16);
+  if (!Number.isFinite(value)) return null;
+  return [value >> 16 & 255, value >> 8 & 255, value & 255];
+}
+function cssColor(color) {
+  return `rgb(${color[0]},${color[1]},${color[2]})`;
+}
+function describeTextStyle(raw) {
+  const style = raw || {};
+  return {
+    family: fontFamilyOf(style.font ? style.font.name : ""),
+    weight: fontWeightOf(style.font ? style.font.name : "", style.fauxBold),
+    size: Math.round((style.fontSize || 0) * 100) / 100,
+    color: fillColorOf(style.fillColor),
+    tracking: style.tracking || 0
+  };
+}
+function mergeTextStyle(base, raw, baseStyle) {
+  const style = raw && raw.style || {};
+  const has = (key) => style[key] !== void 0 && style[key] !== null;
+  const merged = { ...base };
+  if (has("font") && style.font && style.font.name) {
+    merged.family = fontFamilyOf(style.font.name);
+    merged.weight = fontWeightOf(style.font.name, has("fauxBold") ? style.fauxBold : baseStyle?.fauxBold);
+  } else if (has("fauxBold")) {
+    merged.weight = fontWeightOf(merged.family, style.fauxBold);
+  }
+  if (has("fontSize") && style.fontSize > 0) merged.size = Math.round(style.fontSize * 100) / 100;
+  if (has("fillColor") && style.fillColor) {
+    merged.color = [
+      Math.round(style.fillColor.r ?? 0),
+      Math.round(style.fillColor.g ?? 0),
+      Math.round(style.fillColor.b ?? 0)
+    ];
+  }
+  if (has("tracking")) merged.tracking = style.tracking;
+  return merged;
+}
+function describeTextLayer(text) {
+  const style = Array.isArray(text.style) ? text.style[0] : text.style || {};
+  const paragraph = Array.isArray(text.paragraphStyle) ? text.paragraphStyle[0] || {} : text.paragraphStyle || {};
+  const justification = String(paragraph.justification || "");
+  const base = describeTextStyle(style);
+  const value = String(text.text || "").replace(/\r$/, "").replace(/\r/g, "\n");
+  const runs = [];
+  for (const run of text.styleRuns || []) {
+    const length = Math.max(0, Math.round(run.length || 0));
+    if (!length) continue;
+    runs.push({ len: length, ...mergeTextStyle(base, run, style) });
+  }
+  let total = runs.reduce((sum, run) => sum + run.len, 0);
+  if (total !== value.length && runs.length) {
+    if (total < value.length) {
+      runs.push({ len: value.length - total, ...base });
+    } else {
+      let left = value.length;
+      for (let index = 0; index < runs.length && left > 0; index += 1) {
+        runs[index].len = Math.min(runs[index].len, left);
+        left -= runs[index].len;
+      }
+      while (runs.length && runs[runs.length - 1].len <= 0) runs.pop();
+    }
+  }
+  if (!runs.length && value.length) runs.push({ len: value.length, ...base });
+  const leading = style.autoLeading === false && style.leading > 0 ? Math.round(style.leading * 100) / 100 : 0;
+  return {
+    value,
+    runs,
+    align: /center/i.test(justification) ? "center" : /right/i.test(justification) ? "right" : "left",
+    leading
+  };
+}
+function pxPerPtOf(base, rasterHeight) {
+  const lines = Math.max(1, String(base.value || "\u5B57").split("\n").length);
+  const maxPt = (base.runs || []).reduce((max, run) => Math.max(max, run.size || 0), 0) || 24;
+  return rasterHeight > 0 ? rasterHeight / (lines * maxPt * 1.2) : 1;
+}
+function sameStyle(a, b) {
+  return a.family === b.family && a.weight === b.weight && a.size === b.size && a.tracking === b.tracking && a.color[0] === b.color[0] && a.color[1] === b.color[1] && a.color[2] === b.color[2];
+}
+function compressRuns(chars) {
+  const runs = [];
+  for (const style of chars) {
+    const last = runs[runs.length - 1];
+    if (last && sameStyle(last, style)) last.len += 1;
+    else runs.push({ len: 1, ...style });
+  }
+  return runs;
+}
+function remapRuns(runs, oldText, newText) {
+  const chars = [];
+  for (const run of runs || []) {
+    for (let index = 0; index < run.len; index += 1) chars.push(run);
+  }
+  while (chars.length < oldText.length && chars.length) chars.push(chars[chars.length - 1]);
+  if (!chars.length) return [];
+  let head = 0;
+  while (head < oldText.length && head < newText.length && oldText[head] === newText[head]) head += 1;
+  let tail = 0;
+  while (tail < oldText.length - head && tail < newText.length - head && oldText[oldText.length - 1 - tail] === newText[newText.length - 1 - tail]) {
+    tail += 1;
+  }
+  const inserted = newText.length - head - tail;
+  const inherit = chars[head - 1] || chars[head] || chars[0];
+  const out = chars.slice(0, head);
+  for (let index = 0; index < inserted; index += 1) out.push(inherit);
+  out.push(...chars.slice(oldText.length - tail));
+  while (out.length < newText.length) out.push(inherit);
+  return compressRuns(out.slice(0, newText.length));
+}
+function charStyles(runs, value) {
+  const out = [];
+  const source = runs && runs.length ? runs : [];
+  for (const run of source) {
+    for (let index = 0; index < run.len && out.length < value.length; index += 1) out.push(run);
+  }
+  while (out.length < value.length && source.length) out.push(source[source.length - 1]);
+  return out;
+}
+var ALIGNS = /* @__PURE__ */ new Set(["left", "center", "right"]);
+function sizeOf(row, pxPerPt) {
+  if (row.sizePx != null && Number(row.sizePx) > 0 && pxPerPt > 0) {
+    return Math.round(Number(row.sizePx) / pxPerPt * 100) / 100;
+  }
+  if (row.size != null && Number(row.size) > 0) return Number(row.size);
+  return null;
+}
+function mergeTextOverride(base, override = {}, pxPerPt = 0) {
+  const value = override.value != null ? String(override.value) : base.value;
+  const layout = ["align", "leading", "dx", "dy"].some((key) => override[key] != null);
+  if (value === base.value && !override.runs && override.font == null && override.weight == null && override.size == null && override.sizePx == null && override.color == null && override.tracking == null && !layout) {
+    return null;
+  }
+  let runs = (value === base.value ? base.runs : remapRuns(base.runs, base.value, value)).map(
+    (run) => ({ ...run })
+  );
+  if (!runs.length && value.length) {
+    const only = base.runs[0];
+    runs = [{ len: value.length, ...only || { family: null, weight: 400, size: 24, color: [0, 0, 0], tracking: 0 } }];
+  }
+  if (Array.isArray(override.runs) && override.runs.length) {
+    const chars = charStyles(runs, value).map(({ len: _len, ...style }) => style);
+    let offset = 0;
+    for (const row of override.runs) {
+      const len = Math.max(0, Math.round(Number(row.len) || 0));
+      if (!len || offset >= chars.length) continue;
+      const patch2 = {};
+      if (row.family != null) patch2.family = String(row.family);
+      if (row.weight != null) patch2.weight = Number(row.weight);
+      const size2 = sizeOf(row, pxPerPt);
+      if (size2 != null) patch2.size = size2;
+      if (row.tracking != null) patch2.tracking = Number(row.tracking);
+      if (row.color != null) {
+        const parsed = parseColor(row.color);
+        if (parsed) patch2.color = parsed;
+      }
+      const end = Math.min(chars.length, offset + len);
+      for (let index = offset; index < end; index += 1) chars[index] = { ...chars[index], ...patch2 };
+      offset = end;
+    }
+    if (chars.length) runs = compressRuns(chars);
+  }
+  const patch = {};
+  if (override.font != null) patch.family = String(override.font);
+  if (override.weight != null) patch.weight = Number(override.weight);
+  const size = sizeOf(override, pxPerPt);
+  if (size != null) patch.size = size;
+  if (override.tracking != null) patch.tracking = Number(override.tracking);
+  if (override.color != null) {
+    const parsed = parseColor(override.color);
+    if (parsed) patch.color = parsed;
+  }
+  if (Object.keys(patch).length) {
+    runs = runs.map((run) => ({ ...run, ...patch }));
+  }
+  return {
+    value,
+    runs,
+    align: ALIGNS.has(override.align) ? override.align : base.align,
+    leading: Number(override.leading) > 0 ? Number(override.leading) : base.leading || 0,
+    dx: Number(override.dx) || 0,
+    dy: Number(override.dy) || 0
+  };
+}
+function segmentsOf(chars, pxPerPt) {
+  const out = [];
+  for (const style of chars) {
+    const px = Math.max(1, style.size * pxPerPt);
+    const last = out[out.length - 1];
+    if (last && last.family === style.family && last.weight === style.weight && Math.abs(last.px - px) < 0.01 && last.tracking === style.tracking && last.color[0] === style.color[0] && last.color[1] === style.color[1] && last.color[2] === style.color[2]) {
+      last.text += style.ch;
+      continue;
+    }
+    out.push({
+      text: style.ch,
+      family: style.family,
+      weight: style.weight,
+      px,
+      tracking: style.tracking || 0,
+      color: style.color
+    });
+  }
+  return out;
+}
+function fontString(segment) {
+  return `${segment.weight} ${segment.px}px "${segment.family || "sans-serif"}", "PingFang SC", "Microsoft YaHei", sans-serif`;
+}
+function applyTracking(ctx, segment) {
+  try {
+    ctx.letterSpacing = `${(segment.tracking / 1e3 * segment.px).toFixed(2)}px`;
+  } catch {
+  }
+}
+function drawSegments(ctx, segments, x, baseline) {
+  let cursor = x;
+  for (const segment of segments) {
+    ctx.font = fontString(segment);
+    ctx.fillStyle = cssColor(segment.color);
+    applyTracking(ctx, segment);
+    ctx.fillText(segment.text, cursor, baseline);
+    const trackPx = segment.tracking / 1e3 * segment.px;
+    cursor += ctx.measureText(segment.text).width + Math.max(0, segment.text.length) * trackPx;
+  }
+}
+function measureSegments(ctx, segments) {
+  let width = 0;
+  for (const segment of segments) {
+    ctx.font = fontString(segment);
+    const trackPx = segment.tracking / 1e3 * segment.px;
+    width += ctx.measureText(segment.text).width + Math.max(0, segment.text.length) * trackPx;
+  }
+  return width;
+}
+function synthesizeTextLeaf(leaf, base, override, hasFont) {
+  const raster = leaf.__raster || {
+    left: leaf.left,
+    top: leaf.top,
+    width: leaf.width,
+    height: leaf.height
+  };
+  const pxPerPt = pxPerPtOf(base, raster.height);
+  const effective = mergeTextOverride(base, override, pxPerPt);
+  if (!effective) {
+    restoreTextLeaf(leaf);
+    return [];
+  }
+  const warnings = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const run of effective.runs) {
+    if (!run.family || seen.has(run.family)) continue;
+    seen.add(run.family);
+    if (hasFont && !hasFont(run.family)) {
+      warnings.push(`\u5B57\u4F53 ${run.family} \u672A\u6CE8\u518C\uFF0C\u8BE5\u6BB5\u5C06\u7528\u56DE\u9000\u5B57\u4F53\u6E32\u67D3`);
+    }
+  }
+  const lines = effective.value.split("\n");
+  const chars = charStyles(effective.runs, effective.value);
+  const perLine = [];
+  let cursor = 0;
+  for (const line of lines) {
+    const slice = [];
+    for (let index = 0; index < line.length; index += 1) {
+      slice.push({ ch: line[index], ...chars[cursor] });
+      cursor += 1;
+    }
+    perLine.push(segmentsOf(slice, pxPerPt));
+  }
+  const scratch = createCanvas(4, 4).getContext("2d");
+  const widths = perLine.map((segments) => measureSegments(scratch, segments));
+  const maxW = Math.max(1, ...widths);
+  const fixedLeading = effective.leading > 0 ? effective.leading * pxPerPt : 0;
+  const lineHeights = perLine.map(
+    (segments) => fixedLeading || Math.max(1, ...segments.map((segment) => segment.px)) * 1.2
+  );
+  const totalH = lineHeights.reduce((sum, height) => sum + height, 0);
+  const maxPx = Math.max(1, ...perLine.flatMap((segments) => segments.map((segment) => segment.px)));
+  const pad = Math.ceil(maxPx * 0.25) + 2;
+  const canvas = createCanvas(Math.max(1, Math.ceil(maxW) + pad * 2), Math.max(1, Math.ceil(totalH) + pad * 2));
+  const ctx = canvas.getContext("2d");
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "left";
+  let top = pad;
+  for (let index = 0; index < perLine.length; index += 1) {
+    const segments = perLine[index];
+    const lineHeight = lineHeights[index];
+    const baseline = top + lineHeight * 0.82;
+    let x = pad;
+    if (effective.align === "center") x = pad + (maxW - widths[index]) / 2;
+    else if (effective.align === "right") x = pad + (maxW - widths[index]);
+    drawSegments(ctx, segments, x, baseline);
+    top += lineHeight;
+  }
+  let left = raster.left + raster.width / 2 - canvas.width / 2;
+  if (effective.align === "left") left = raster.left - pad;
+  else if (effective.align === "right") left = raster.left + raster.width - canvas.width + pad;
+  leaf.canvas = canvas;
+  leaf.left = Math.round(left + effective.dx);
+  leaf.top = Math.round(raster.top + raster.height / 2 - canvas.height / 2 + effective.dy);
+  leaf.width = canvas.width;
+  leaf.height = canvas.height;
+  return warnings;
+}
+function restoreTextLeaf(leaf) {
+  if (!leaf.__raster) return;
+  leaf.canvas = leaf.__raster.canvas;
+  leaf.left = leaf.__raster.left;
+  leaf.top = leaf.__raster.top;
+  leaf.width = leaf.__raster.width;
+  leaf.height = leaf.__raster.height;
+}
+function applyTextOverrides(doc, overrides, hasFont) {
+  const warnings = [];
+  const list = Array.isArray(overrides) ? overrides : [];
+  for (const override of list) {
+    const target = String(override.layer ?? "");
+    const entry = doc.entries.find(
+      (item) => item.id === target || item.leafId === target || item.name === target
+    );
+    if (!entry) {
+      warnings.push(`\u6587\u5B57\u5C42\u4E0D\u5B58\u5728\uFF1A${target}`);
+      continue;
+    }
+    if (!entry.text || !entry.leafId) {
+      warnings.push(`${entry.name}\uFF1A\u6CA1\u6709\u6805\u683C\u50CF\u7D20\u6216\u6587\u5B57\u6570\u636E\uFF0C\u8DF3\u8FC7`);
+      continue;
+    }
+    const leaf = doc.leaves.find((item) => item.id === entry.leafId);
+    if (!leaf) {
+      warnings.push(`${entry.name}\uFF1A\u627E\u4E0D\u5230\u5BF9\u5E94\u56FE\u5C42\uFF0C\u8DF3\u8FC7`);
+      continue;
+    }
+    if (!leaf.__raster) {
+      leaf.__raster = {
+        canvas: leaf.canvas,
+        left: leaf.left,
+        top: leaf.top,
+        width: leaf.width,
+        height: leaf.height
+      };
+    } else {
+      restoreTextLeaf(leaf);
+    }
+    try {
+      warnings.push(...synthesizeTextLeaf(leaf, entry.text, override, hasFont));
+    } catch (error) {
+      restoreTextLeaf(leaf);
+      warnings.push(`${entry.name}\uFF1A\u91CD\u7ED8\u5931\u8D25\uFF08${error?.message || error}\uFF09\uFF0C\u4FDD\u7559\u539F\u50CF\u7D20`);
+    }
+  }
+  return warnings;
+}
+function cloneDoc(doc) {
+  return {
+    ...doc,
+    slots: new Set(doc.slots),
+    hidden: new Set(doc.hidden),
+    entries: doc.entries.map((entry) => ({ ...entry })),
+    leaves: doc.leaves.map((leaf) => ({ ...leaf }))
+  };
+}
+function mergeOverrideLists(globalList, skuList) {
+  const globalOverrides = Array.isArray(globalList) ? globalList : [];
+  const skuOverrides = Array.isArray(skuList) ? skuList : [];
+  if (!globalOverrides.length && !skuOverrides.length) return null;
+  if (!skuOverrides.length) return globalOverrides;
+  if (!globalOverrides.length) return skuOverrides;
+  const byTarget = /* @__PURE__ */ new Map();
+  for (const override of globalOverrides) byTarget.set(String(override.layer), override);
+  for (const override of skuOverrides) byTarget.set(String(override.layer), override);
+  return [...byTarget.values()];
 }
 
 // src/core/psd.js
@@ -16629,137 +16918,10 @@ async function parseTemplate(file, onStage = () => {
     hidden,
     slots: /* @__PURE__ */ new Set(),
     size: file.size,
-    // Edits live on the document so a re-compose keeps them, and so a project
-    // file can round-trip them instead of re-deriving from the PSD.
-    textEdits: /* @__PURE__ */ new Map(),
+    // Images placed by psd_edit; drawn through the same layer compositor.
     elements: []
   };
 }
-var FONT_FAMILY_MAP = [
-  [/^PingFangSC/i, "PingFang SC"],
-  [/^PingFang/i, "PingFang SC"],
-  [/^HiraginoSansGB/i, "Hiragino Sans GB"],
-  [/^MicrosoftYaHei/i, "Microsoft YaHei"],
-  [/^MicrosoftJhengHei/i, "Microsoft JhengHei"],
-  [/^(SourceHanSans|SourceHanSansCN|NotoSansSC|NotoSansCJK)/i, "Noto Sans SC"],
-  [/^SourceHanSerif/i, "Noto Serif SC"],
-  [/^SimHei|^STHeiti/i, "Heiti SC"],
-  [/^SimSun|^STSong/i, "Songti SC"],
-  [/^AlibabaPuHuiTi/i, "Alibaba PuHuiTi"],
-  [/^OPPOSans/i, "OPPO Sans"],
-  [/^HarmonyOS/i, "HarmonyOS Sans"],
-  [/^DIN/i, "DIN Alternate"],
-  [/^ArialMT|^Arial/i, "Arial"],
-  [/^HelveticaNeue|^Helvetica/i, "Helvetica Neue"],
-  [/^Inter/i, "Inter"],
-  [/^Roboto/i, "Roboto"]
-];
-function fontFamilyOf(name) {
-  const raw = String(name || "").replace(/^#/, "").trim();
-  if (!raw) return null;
-  for (const [pattern, family] of FONT_FAMILY_MAP) {
-    if (pattern.test(raw)) return family;
-  }
-  return raw;
-}
-function fontWeightOf(name, fauxBold) {
-  const raw = String(name || "").toLowerCase();
-  if (/heavy|black|extrabold|ultrabold/.test(raw)) return 800;
-  if (/semibold|demibold|bold/.test(raw)) return 700;
-  if (/medium/.test(raw)) return 500;
-  if (/light|thin/.test(raw)) return 300;
-  return fauxBold ? 700 : 400;
-}
-function fillColorOf(fill) {
-  if (!fill) return [0, 0, 0];
-  if (fill.r != null) {
-    return [Math.round(fill.r ?? 0), Math.round(fill.g ?? 0), Math.round(fill.b ?? 0)];
-  }
-  if (fill.k != null && fill.c == null) {
-    const value = Math.round(fill.k);
-    return [value, value, value];
-  }
-  if (fill.c != null) {
-    const c = (fill.c ?? 0) / 255;
-    const m = (fill.m ?? 0) / 255;
-    const y = (fill.y ?? 0) / 255;
-    const k = (fill.k ?? 0) / 255;
-    return [
-      Math.round(255 * (1 - c) * (1 - k)),
-      Math.round(255 * (1 - m) * (1 - k)),
-      Math.round(255 * (1 - y) * (1 - k))
-    ];
-  }
-  return [0, 0, 0];
-}
-function describeTextStyle(raw) {
-  const style = raw || {};
-  return {
-    family: fontFamilyOf(style.font ? style.font.name : ""),
-    weight: fontWeightOf(style.font ? style.font.name : "", style.fauxBold),
-    size: Math.round((style.fontSize || 0) * 100) / 100,
-    color: fillColorOf(style.fillColor),
-    tracking: style.tracking || 0
-  };
-}
-function mergeTextStyle(base, raw, baseStyle) {
-  const style = raw && raw.style || {};
-  const has = (key) => style[key] !== void 0 && style[key] !== null;
-  const merged = { ...base };
-  if (has("font") && style.font && style.font.name) {
-    merged.family = fontFamilyOf(style.font.name);
-    merged.weight = fontWeightOf(style.font.name, has("fauxBold") ? style.fauxBold : baseStyle?.fauxBold);
-  } else if (has("fauxBold")) {
-    merged.weight = fontWeightOf(merged.family, style.fauxBold);
-  }
-  if (has("fontSize") && style.fontSize > 0) merged.size = Math.round(style.fontSize * 100) / 100;
-  if (has("fillColor") && style.fillColor) {
-    merged.color = [
-      Math.round(style.fillColor.r ?? 0),
-      Math.round(style.fillColor.g ?? 0),
-      Math.round(style.fillColor.b ?? 0)
-    ];
-  }
-  if (has("tracking")) merged.tracking = style.tracking;
-  return merged;
-}
-function describeTextLayer(text) {
-  const style = Array.isArray(text.style) ? text.style[0] : text.style || {};
-  const base = describeTextStyle(style);
-  const value = String(text.text || "").replace(/\r$/, "").replace(/\r/g, "\n");
-  const runs = [];
-  for (const run of text.styleRuns || []) {
-    const length = Math.max(0, Math.round(run.length || 0));
-    if (!length) continue;
-    runs.push({ len: length, ...mergeTextStyle(base, run, style) });
-  }
-  let total = runs.reduce((sum, run) => sum + run.len, 0);
-  if (total !== value.length && runs.length) {
-    if (total < value.length) {
-      runs.push({ len: value.length - total, ...base });
-    } else {
-      let left = value.length;
-      for (let index = 0; index < runs.length && left > 0; index += 1) {
-        runs[index].len = Math.min(runs[index].len, left);
-        left -= runs[index].len;
-      }
-      while (runs.length && runs[runs.length - 1].len <= 0) runs.pop();
-    }
-    total = runs.reduce((sum, run) => sum + run.len, 0);
-  }
-  if (!runs.length && value.length) runs.push({ len: value.length, ...base });
-  const paragraph = style.paragraphStyle || {};
-  const leading = Number(style.leading) || 0;
-  return {
-    value,
-    runs,
-    align: paragraph.align != null ? PARAGRAPH_ALIGN[paragraph.align] || "left" : "left",
-    leading,
-    autoLeading: style.autoLeading !== false,
-    fontSize: base.size
-  };
-}
-var PARAGRAPH_ALIGN = { 0: "left", 1: "right", 2: "center", 3: "justify" };
 function buildTree(psd) {
   const entries = [];
   const leaves = [];
@@ -16876,7 +17038,7 @@ function effectList(effects, name) {
   if (!value) return [];
   return (Array.isArray(value) ? value : [value]).filter((item) => item && item.enabled);
 }
-function cssColor(color, alpha = 1) {
+function cssColor2(color, alpha = 1) {
   if (!color) return `rgba(0,0,0,${alpha})`;
   const r = Math.round(color.r ?? 0);
   const g = Math.round(color.g ?? 0);
@@ -16911,7 +17073,7 @@ function paintGradient(ctx, width, height, effect) {
     );
   }
   for (const stop of stops) {
-    fill.addColorStop(Math.max(0, Math.min(1, stop.location)), cssColor(stop.color, 1));
+    fill.addColorStop(Math.max(0, Math.min(1, stop.location)), cssColor2(stop.color, 1));
   }
   ctx.save();
   ctx.globalCompositeOperation = "source-atop";
@@ -16982,7 +17144,7 @@ function composeLeaf(leaf, previous) {
     ctx.save();
     ctx.globalCompositeOperation = "source-atop";
     ctx.globalAlpha = solid.opacity ?? 1;
-    ctx.fillStyle = cssColor(solid.color, 1);
+    ctx.fillStyle = cssColor2(solid.color, 1);
     ctx.fillRect(0, 0, leaf.width, leaf.height);
     ctx.restore();
   }
@@ -16998,7 +17160,7 @@ function composeLeaf(leaf, previous) {
   const out = makeCanvas(leaf.width + pad * 2, leaf.height + pad * 2);
   const outCtx = out.getContext("2d");
   for (const shadow of shadows) {
-    const color = cssColor(shadow.color, shadow.opacity ?? 1);
+    const color = cssColor2(shadow.color, shadow.opacity ?? 1);
     const isGlow = shadow === effectList(leaf.effects, "outerGlow")[0];
     const distance = isGlow ? 0 : effectValue(shadow.distance);
     const angle = (shadow.angle ?? 120) * Math.PI / 180;
@@ -17013,7 +17175,7 @@ function composeLeaf(leaf, previous) {
   }
   if (stroke) {
     const width = effectValue(stroke.size);
-    const tinted = silhouette(base, cssColor(stroke.color, 1));
+    const tinted = silhouette(base, cssColor2(stroke.color, 1));
     const steps = 24;
     outCtx.save();
     outCtx.globalAlpha = stroke.opacity ?? 1;
@@ -17086,44 +17248,13 @@ function isStackedCopy(base, other, doc) {
   return true;
 }
 var SLOT_SIBLING_OVERLAP = 0.25;
-function applyTextEdit(doc, leaf) {
-  if (!leaf.isText || !doc.textEdits || doc.textEdits.size === 0) return leaf;
-  const edit = doc.textEdits.get(leaf.entryId);
-  if (!edit) return leaf;
-  const entry = doc.entries.find((item) => item.id === leaf.entryId);
-  if (!entry || !entry.text) return leaf;
-  const text = {
-    ...entry.text,
-    ...edit.value !== void 0 ? { value: edit.value } : null,
-    ...edit.runs ? { runs: edit.runs } : null,
-    ...edit.leading !== void 0 ? { leading: edit.leading } : null,
-    ...edit.align !== void 0 ? { align: edit.align } : null
-  };
-  if (!Array.isArray(text.runs) || text.runs.length === 0) {
-    text.runs = [{ len: String(text.value).length, ...{ size: edit.sizePx || entry.text.fontSize || 12, family: edit.family || "PingFang SC", weight: edit.weight || 400, color: edit.color || [0, 0, 0], tracking: edit.tracking || 0 } }];
-  }
-  const rendered = renderTextEntry(
-    { ...entry, text },
-    { align: edit.align, tracking: edit.tracking }
-  );
-  if (!rendered || !rendered.canvas) return leaf;
-  return {
-    ...leaf,
-    canvas: rendered.canvas,
-    width: rendered.canvas.width,
-    height: rendered.canvas.height,
-    left: rendered.left + (edit.dx || 0),
-    top: rendered.top + (edit.dy || 0),
-    edited: true
-  };
-}
 function elementLeaves(doc) {
-  return (doc.elements || []).map((element, index) => ({
+  return (doc.elements || []).filter((element) => element.canvas).map((element, index) => ({
     id: `x${index}`,
     entryId: null,
     name: element.name || `\u5143\u7D20 ${index + 1}`,
-    left: element.left || 0,
-    top: element.top || 0,
+    left: Math.round(element.left || 0),
+    top: Math.round(element.top || 0),
     width: element.canvas.width,
     height: element.canvas.height,
     canvas: element.canvas,
@@ -17132,22 +17263,25 @@ function elementLeaves(doc) {
     blendMode: element.blend || "normal",
     clipping: false,
     effects: null,
-    isText: false,
-    isElement: true,
     path: [],
+    isElement: true,
     aboveSlots: element.aboveSlots !== false
   }));
 }
+function stackWithElements(doc, leaves) {
+  const elements = elementLeaves(doc);
+  if (!elements.length) return leaves;
+  const above = elements.filter((element) => element.aboveSlots);
+  const below = elements.filter((element) => !element.aboveSlots);
+  let at = leaves.findIndex((leaf) => doc.slots.has(leaf.id));
+  if (at < 0) at = Math.min(1, leaves.length);
+  return [...leaves.slice(0, at), ...below, ...leaves.slice(at), ...above];
+}
 function buildScene(doc) {
-  const stacked = [];
-  const below = [];
-  const above = [];
-  for (const element of elementLeaves(doc)) (element.aboveSlots ? above : below).push(element);
-  const visibleLeaves = [
-    ...below,
-    ...doc.leaves.filter((leaf) => isLeafVisible(doc, leaf)).map((leaf) => applyTextEdit(doc, leaf)),
-    ...above
-  ];
+  const visibleLeaves = stackWithElements(
+    doc,
+    doc.leaves.filter((leaf) => isLeafVisible(doc, leaf))
+  );
   const entryById = new Map(doc.entries.map((entry) => [entry.id, entry]));
   const clusters = [];
   const clusterOf = /* @__PURE__ */ new Map();
@@ -17157,16 +17291,18 @@ function buildScene(doc) {
     if (!doc.slots.has(leaf.id) || claimed.has(leaf.id)) continue;
     claimed.add(leaf.id);
     let rect = leafBounds(leaf);
+    const members = /* @__PURE__ */ new Set([leaf.id]);
     for (const other of visibleLeaves) {
-      if (claimed.has(other.id) || doc.slots.has(other.id)) continue;
+      if (claimed.has(other.id) || doc.slots.has(other.id) || other.isElement) continue;
       if (!isStackedCopy(leaf, other, doc)) continue;
       claimed.add(other.id);
+      members.add(other.id);
       rect = unionBounds(rect, leafBounds(other));
     }
     const cluster = {
       id: leaf.id,
       name: leaf.name,
-      members: /* @__PURE__ */ new Set([leaf.id]),
+      members,
       rect: {
         x: rect.left,
         y: rect.top,
@@ -17186,7 +17322,7 @@ function buildScene(doc) {
     const parent = entryById.get(leaf.entryId)?.parentId;
     if (!parent) continue;
     for (const other of visibleLeaves) {
-      if (claimed.has(other.id) || doc.slots.has(other.id)) continue;
+      if (claimed.has(other.id) || doc.slots.has(other.id) || other.isElement) continue;
       if (!other.path.includes(parent)) continue;
       if (boundsOverlapRatio(leafBounds(leaf), leafBounds(other)) < SLOT_SIBLING_OVERLAP) continue;
       cluster.members.add(other.id);
@@ -17224,6 +17360,15 @@ function buildScene(doc) {
     width: doc.width,
     height: doc.height
   };
+}
+function disposeScene(scene) {
+  if (!scene) return;
+  for (const part of scene.parts) {
+    if (part.kind === "layers" && part.canvas) {
+      part.canvas.width = 1;
+      part.canvas.height = 1;
+    }
+  }
 }
 
 // src/core/fit.js
@@ -17352,18 +17497,85 @@ function uniqueName(used, base, extension) {
 // src/server.js
 setCanvasFactory((width, height) => createCanvas2(width, height));
 (0, import_ag_psd2.initializeCanvas)((width, height) => createCanvas2(width, height));
-setFontFaceInstaller((family, filePath) => GlobalFonts.registerFromPath(filePath, family));
 var IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([".png", ".jpg", ".jpeg", ".webp", ".bmp"]);
+var FONT_EXTENSIONS = /* @__PURE__ */ new Set([".ttf", ".otf", ".ttc", ".otc", ".woff", ".woff2"]);
 var templateCache = /* @__PURE__ */ new Map();
+var registeredFamilies = /* @__PURE__ */ new Set();
+async function registerFonts(cwd, { dir, paths } = {}) {
+  const files = [];
+  if (dir) {
+    const absolute = await resolveInWorkspace(cwd, dir);
+    const stat = await fs.stat(absolute);
+    if (stat.isDirectory()) {
+      const entries = await fs.readdir(absolute, { withFileTypes: true });
+      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (entry.isFile()) files.push(path.join(absolute, entry.name));
+      }
+    } else {
+      files.push(absolute);
+    }
+  }
+  for (const item of paths || []) files.push(await resolveInWorkspace(cwd, item));
+  const registered = [];
+  const skipped = [];
+  for (const full of files) {
+    const extension = path.extname(full).toLowerCase();
+    if (!FONT_EXTENSIONS.has(extension)) {
+      skipped.push(path.basename(full));
+      continue;
+    }
+    const stem = path.basename(full, extension).replace(/_+/g, " ").replace(/\s+/g, " ").trim() || "font";
+    const aliases = [stem];
+    try {
+      const postScript = readFontPostScriptName(await fs.readFile(full));
+      if (postScript) aliases.push(postScript);
+    } catch {
+    }
+    for (const alias of [...aliases]) {
+      const mapped = fontFamilyOf(alias);
+      if (mapped && !aliases.includes(mapped) && !GlobalFonts.has(mapped)) aliases.push(mapped);
+    }
+    let ok = false;
+    for (const alias of new Set(aliases)) {
+      try {
+        if (GlobalFonts.registerFromPath(full, alias) !== false) {
+          registered.push(alias);
+          registeredFamilies.add(alias);
+          ok = true;
+        }
+      } catch {
+      }
+    }
+    if (!ok) skipped.push(path.basename(full));
+  }
+  return { registered: [...new Set(registered)], skipped };
+}
+function templateFamilies(doc) {
+  const families = /* @__PURE__ */ new Set();
+  for (const entry of doc.entries) {
+    for (const run of entry.text?.runs || []) if (run.family) families.add(run.family);
+  }
+  for (const edit of doc.textEdits?.values() || []) {
+    if (edit.font) families.add(String(edit.font));
+    for (const run of edit.runs || []) if (run.family) families.add(String(run.family));
+  }
+  return [...families].sort();
+}
+function isInside(root, target) {
+  const relative = path.relative(root, target);
+  return relative === "" || !relative.startsWith("..") && !path.isAbsolute(relative);
+}
 async function resolveInWorkspace(cwd, candidate, { mustExist = true } = {}) {
   if (typeof candidate !== "string" || candidate.trim() === "") {
     throw new Error("A non-empty path is required");
   }
   const absolute = path.resolve(cwd, candidate);
-  const relative = path.relative(cwd, absolute);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+  if (!isInside(cwd, absolute)) {
     throw new Error(`Path must stay inside the session workspace: ${candidate}`);
   }
+  const realCwd = await fs.realpath(cwd).catch(() => cwd);
+  const insideWorkspace = (real) => isInside(cwd, real) || isInside(realCwd, real);
+  const outside = () => new Error(`Path resolves outside the session workspace: ${candidate}`);
   if (mustExist) {
     let real;
     try {
@@ -17371,11 +17583,24 @@ async function resolveInWorkspace(cwd, candidate, { mustExist = true } = {}) {
     } catch {
       throw new Error(`Path does not exist: ${candidate}`);
     }
-    const realRelative = path.relative(cwd, real);
-    if (realRelative.startsWith("..") || path.isAbsolute(realRelative)) {
-      throw new Error(`Path resolves outside the session workspace: ${candidate}`);
-    }
+    if (!insideWorkspace(real)) throw outside();
     return real;
+  }
+  const link = await fs.lstat(absolute).catch(() => null);
+  if (link) {
+    const real = await fs.realpath(absolute).catch(() => null);
+    if (!real || !insideWorkspace(real)) throw outside();
+  }
+  let ancestor = path.dirname(absolute);
+  for (; ; ) {
+    const real = await fs.realpath(ancestor).catch(() => null);
+    if (real) {
+      if (!insideWorkspace(real)) throw outside();
+      break;
+    }
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) break;
+    ancestor = parent;
   }
   return absolute;
 }
@@ -17479,6 +17704,7 @@ async function inspectTemplate({ cwd, template }) {
     if (entry.kind === "text") layer.text = true;
     if (entry.text) {
       layer.textContent = entry.text.value;
+      layer.textAlign = entry.text.align;
       layer.runCount = entry.text.runs.length;
       if (entry.text.runs.length) {
         layer.runs = entry.text.runs.slice(0, 8);
@@ -17511,11 +17737,14 @@ async function renderBatch({
   anchor = "center",
   fill = 1,
   adjustments = {},
+  text,
+  textBySku,
+  fontDir,
   zip = false
 }) {
   const absolute = await resolveInWorkspace(cwd, template);
   const doc = await loadTemplateDoc(absolute);
-  const slotIds = slots.length > 0 ? resolveSlots(doc, slots) : suggestSlots(doc);
+  const slotIds = slots && slots.length > 0 ? resolveSlots(doc, slots) : doc.pinnedSlots && doc.pinnedSlots.size ? [...doc.pinnedSlots] : suggestSlots(doc);
   if (slotIds.length === 0) {
     throw new Error(
       "No product slot was detected. Inspect the layer tree and pass one or more slot layer names."
@@ -17527,39 +17756,79 @@ async function renderBatch({
   if (skuFiles.length === 0) {
     throw new Error("No SKU images were found. Pass `skus` paths or a `skuDir` folder.");
   }
+  let fontsRegistered;
+  let fontsSkipped;
+  if (fontDir) {
+    const registration = await registerFonts(cwd, { dir: fontDir });
+    fontsRegistered = registration.registered;
+    fontsSkipped = registration.skipped;
+  }
+  const textWarnings = [];
+  const savedEdits = doc.textEdits && doc.textEdits.size ? [...doc.textEdits.values()] : null;
+  const groups = /* @__PURE__ */ new Map();
+  const used = /* @__PURE__ */ new Set();
+  const extensionFor = format === "png" ? "png" : "jpg";
+  const jobs = skuFiles.map((file, index) => {
+    const base = path.basename(file, path.extname(file));
+    const overrides = mergeOverrideLists(
+      mergeOverrideLists(savedEdits, text),
+      textBySku ? textBySku[path.basename(file)] ?? textBySku[base] : void 0
+    );
+    const signature = overrides ? JSON.stringify(overrides) : "";
+    let group = groups.get(signature);
+    if (!group) {
+      group = { overrides, jobs: [] };
+      groups.set(signature, group);
+    }
+    const job = { index, file, base, name: uniqueName(used, sanitizeName(base), extensionFor) };
+    group.jobs.push(job);
+    return job;
+  });
+  const textVariants = [...groups.values()].filter((group) => group.overrides).length;
   const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const relativeOut = outDir || path.join("out", "psd-batch", `${sanitizeName(doc.name)}-${stamp}`);
   const absoluteOut = await resolveInWorkspace(cwd, relativeOut, { mustExist: false });
   await fs.mkdir(absoluteOut, { recursive: true });
   const isPng = format === "png";
   const mime = isPng ? "image/png" : "image/jpeg";
-  const extension = isPng ? "png" : "jpg";
   const settings = {
     mode: fit || DEFAULT_SETTINGS.mode,
     anchor: anchor || DEFAULT_SETTINGS.anchor,
     fill: Number.isFinite(Number(fill)) ? Number(fill) : DEFAULT_SETTINGS.fill
   };
-  const used = /* @__PURE__ */ new Set();
-  const files = [];
-  const zipEntries = {};
-  for (const file of skuFiles) {
-    const image = await loadImage(file);
-    const content = measureContent(image);
-    const base = path.basename(file, path.extname(file));
-    const adjust = toAdjustment(adjustments[path.basename(file)] ?? adjustments[base]);
-    const canvas = createCanvas2(doc.width, doc.height);
-    const ctx = canvas.getContext("2d");
-    if (!isPng) {
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, doc.width, doc.height);
+  const zipBuffers = zip ? new Array(jobs.length) : null;
+  for (const group of groups.values()) {
+    let scene = doc.scene;
+    if (group.overrides) {
+      const clone = cloneDoc(doc);
+      textWarnings.push(...applyTextOverrides(clone, group.overrides, (family) => GlobalFonts.has(family)));
+      scene = buildScene(clone);
     }
-    drawScene(ctx, doc.scene, image, content, settings, adjust);
-    const buffer = canvas.toBuffer(mime, isPng ? void 0 : Math.round(quality));
-    const name = uniqueName(used, sanitizeName(base), extension);
-    await fs.writeFile(path.join(absoluteOut, name), buffer);
-    files.push(name);
-    if (zip) zipEntries[name] = new Uint8Array(buffer);
+    try {
+      for (const job of group.jobs) {
+        const image = await loadImage(job.file);
+        const content = measureContent(image);
+        const adjust = toAdjustment(adjustments[path.basename(job.file)] ?? adjustments[job.base]);
+        const canvas = createCanvas2(doc.width, doc.height);
+        const ctx = canvas.getContext("2d");
+        if (!isPng) {
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, doc.width, doc.height);
+        }
+        drawScene(ctx, scene, image, content, settings, adjust);
+        const buffer = canvas.toBuffer(mime, isPng ? void 0 : Math.round(quality));
+        await fs.writeFile(path.join(absoluteOut, job.name), buffer);
+        if (zipBuffers) zipBuffers[job.index] = new Uint8Array(buffer);
+      }
+    } finally {
+      if (scene !== doc.scene) disposeScene(scene);
+    }
   }
+  const files = jobs.map((job) => job.name);
+  const zipEntries = {};
+  if (zipBuffers) jobs.forEach((job) => {
+    zipEntries[job.name] = zipBuffers[job.index];
+  });
   let zipPath;
   if (zip) {
     const data = zipSync(zipEntries, { level: 0 });
@@ -17579,6 +17848,10 @@ async function renderBatch({
     suppressed: doc.scene.suppressed.slice(0, 50),
     suppressedCount: doc.scene.suppressed.length,
     suppressedTruncated: doc.scene.suppressed.length > 50,
+    textVariants,
+    ...fontsRegistered ? { fontsRegistered } : {},
+    ...fontsSkipped && fontsSkipped.length ? { fontsSkipped } : {},
+    ...textWarnings.length ? { textWarnings: [...new Set(textWarnings)] } : {},
     ...zipPath ? { zip: path.relative(cwd, zipPath) } : {}
   };
 }
@@ -17599,36 +17872,20 @@ function findTextEntry(doc, spec) {
   }
   return matches[0];
 }
-function normalizeColor(raw) {
-  if (Array.isArray(raw) && raw.length >= 3) {
-    return raw.slice(0, 3).map((value) => Math.max(0, Math.min(255, Math.round(Number(value) || 0))));
-  }
-  if (typeof raw === "string") {
-    const hex = raw.replace("#", "");
-    if (/^[0-9a-f]{6}$/i.test(hex)) {
-      return [0, 2, 4].map((offset) => parseInt(hex.slice(offset, offset + 2), 16));
-    }
-  }
-  return null;
-}
-function normalizeRuns(raw, fallback) {
-  if (!Array.isArray(raw) || raw.length === 0) return null;
-  const runs = [];
-  for (const item of raw) {
-    const length = Math.max(0, Math.round(Number(item && item.len)));
-    if (!length) continue;
-    const run = { len: length };
-    if (item.family) run.family = String(item.family);
-    if (item.weight) run.weight = Number(item.weight);
-    if (item.sizePx) run.size = Number(item.sizePx);
-    else if (item.size) run.size = Number(item.size);
-    const color = normalizeColor(item.color);
-    if (color) run.color = color;
-    if (item.tracking != null) run.tracking = Number(item.tracking);
-    runs.push({ ...fallback, ...run });
-  }
-  return runs.length ? runs : null;
-}
+var TEXT_OVERRIDE_FIELDS = [
+  "value",
+  "runs",
+  "font",
+  "weight",
+  "size",
+  "sizePx",
+  "color",
+  "tracking",
+  "align",
+  "leading",
+  "dx",
+  "dy"
+];
 function composeElement(image, { scale = 1, rotation = 0 } = {}) {
   const width = Math.max(1, Math.round(image.width * scale));
   const height = Math.max(1, Math.round(image.height * scale));
@@ -17647,203 +17904,250 @@ function composeElement(image, { scale = 1, rotation = 0 } = {}) {
   ctx.drawImage(image, -width / 2, -height / 2, width, height);
   return canvas;
 }
-async function registerFontFiles(cwd, { dir, paths }) {
-  const files = [];
-  if (dir) {
-    const directory = await resolveInWorkspace(cwd, dir);
-    const entries = await fs.readdir(directory, { withFileTypes: true });
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (!entry.isFile()) continue;
-      if (!/\.(ttf|otf|ttc|otc|woff2?)$/i.test(entry.name)) continue;
-      files.push(path.join(directory, entry.name));
-    }
-  }
-  for (const item of paths || []) files.push(await resolveInWorkspace(cwd, item));
-  if (files.length === 0) throw new Error("Pass `dir` or `paths` with font files to register");
-  const loaded = [];
-  const failed = [];
-  for (const file of files) {
-    const stem = path.basename(file, path.extname(file)).replace(/_+/g, " ").replace(/\s+/g, " ").trim();
-    const aliases = /* @__PURE__ */ new Set([stem]);
-    try {
-      const buffer = await fs.readFile(file);
-      const postScript = readFontPostScriptName(buffer);
-      if (postScript) aliases.add(postScript);
-    } catch {
-    }
-    let ok = false;
-    for (const alias of aliases) {
-      try {
-        if (GlobalFonts.registerFromPath(file, alias)) {
-          markFontRegistered(alias);
-          ok = true;
-        }
-      } catch (error) {
-        if (alias === stem) failed.push(`${alias}: ${String(error && error.message || error).slice(0, 80)}`);
-      }
-    }
-    if (ok) loaded.push(...aliases);
-  }
-  return { loaded: [...new Set(loaded)], failed };
-}
-function serializeProject(doc, template) {
-  const textEdits = {};
-  for (const [entryId, edit] of doc.textEdits || []) textEdits[entryId] = edit;
+async function loadElement(cwd, spec) {
+  const file = await resolveInWorkspace(cwd, spec.source);
+  const image = await loadImage(file);
+  const scale = Number(spec.scale) > 0 ? Number(spec.scale) : 1;
+  const rotation = Number(spec.rotation) || 0;
   return {
-    version: 1,
-    template,
-    slots: [...doc.slots || []],
-    textEdits,
-    elements: (doc.elements || []).map((element) => ({
-      name: element.name,
-      source: element.source,
-      left: element.left,
-      top: element.top,
-      scale: element.scale,
-      rotation: element.rotation,
-      opacity: element.opacity,
-      blend: element.blend,
-      aboveSlots: element.aboveSlots
-    })),
-    fonts: registeredFonts()
+    name: spec.name ? String(spec.name) : path.basename(file, path.extname(file)),
+    source: path.relative(cwd, file),
+    canvas: composeElement(image, { scale, rotation }),
+    left: Number(spec.left) || 0,
+    top: Number(spec.top) || 0,
+    scale,
+    rotation,
+    opacity: spec.opacity == null ? 1 : Math.max(0, Math.min(1, Number(spec.opacity))),
+    blend: spec.blend || "normal",
+    aboveSlots: spec.aboveSlots !== false
   };
 }
-async function applyProject(doc, cwd, project) {
-  doc.textEdits = new Map(Object.entries(project.textEdits || {}));
-  doc.elements = [];
-  for (const element of project.elements || []) {
-    if (!element.source) continue;
-    const file = await resolveInWorkspace(cwd, element.source);
-    const image = await loadImage(file);
-    doc.elements.push({
-      ...element,
-      canvas: composeElement(image, { scale: element.scale || 1, rotation: element.rotation || 0 })
-    });
+function currentSlots(doc) {
+  return [...doc.pinnedSlots && doc.pinnedSlots.size ? doc.pinnedSlots : doc.slots || []];
+}
+function serializeProject(doc, template) {
+  return {
+    version: 2,
+    template,
+    slots: currentSlots(doc),
+    textEdits: Object.fromEntries(doc.textEdits),
+    elements: doc.elements.map(({ canvas: _canvas, ...element }) => element),
+    fonts: [...registeredFamilies].sort()
+  };
+}
+async function readProject(doc, cwd, project) {
+  if (!project || typeof project !== "object") throw new Error("Project file is not a JSON object");
+  const slots = Array.isArray(project.slots) ? project.slots.map(String) : [];
+  for (const id of slots) {
+    if (!doc.leaves.some((leaf) => leaf.id === id)) throw new Error(`Project slot not in this template: ${id}`);
   }
-  if (Array.isArray(project.slots)) doc.slots = new Set(project.slots);
-  return doc;
+  const textEdits = /* @__PURE__ */ new Map();
+  for (const [key, raw] of Object.entries(project.textEdits || {})) {
+    const entry = findTextEntry(doc, key);
+    textEdits.set(entry.id, { ...pickOverride(raw), layer: entry.id });
+  }
+  const elements = [];
+  for (const spec of project.elements || []) {
+    if (!spec || !spec.source) throw new Error("Project element without a `source` image");
+    try {
+      elements.push(await loadElement(cwd, spec));
+    } catch (error) {
+      throw new Error(`Project element ${spec.name || spec.source}: ${error.message || error}`);
+    }
+  }
+  return { slots, textEdits, elements };
+}
+function pickOverride(raw) {
+  const out = {};
+  for (const key of TEXT_OVERRIDE_FIELDS) if (raw && raw[key] != null) out[key] = raw[key];
+  return out;
+}
+function missingFamilies(doc) {
+  return templateFamilies(doc).filter((family) => !GlobalFonts.has(family));
 }
 async function editTemplate(options) {
   const { cwd, template, action } = options;
   if (!action) throw new Error("An action is required");
   const absolute = await resolveInWorkspace(cwd, template);
   const doc = await loadTemplateDoc(absolute);
+  if (!doc.textEdits) doc.textEdits = /* @__PURE__ */ new Map();
+  if (!doc.elements) doc.elements = [];
   if (action === "status") {
     return {
       template: path.relative(cwd, absolute) || template,
-      slots: [...doc.slots || []],
-      textEdits: [...(doc.textEdits || /* @__PURE__ */ new Map()).keys()],
-      elements: (doc.elements || []).map((element) => element.name),
-      fonts: registeredFonts(),
+      slots: currentSlots(doc),
+      slotsPinned: !!(doc.pinnedSlots && doc.pinnedSlots.size),
+      textEdits: [...doc.textEdits.keys()],
+      elements: doc.elements.map((element) => element.name),
+      fonts: [...registeredFamilies].sort(),
       neededFonts: templateFamilies(doc),
-      missingFonts: unregisteredFamilies(doc)
+      missingFonts: missingFamilies(doc)
     };
   }
   if (action === "text") {
     const entry = findTextEntry(doc, options.layer);
-    const edit = { ...doc.textEdits.get(entry.id) || {} };
-    if (options.text !== void 0) edit.value = String(options.text);
-    if (options.align) edit.align = String(options.align);
-    if (options.leading != null) edit.leading = Number(options.leading);
-    if (options.dx != null) edit.dx = Number(options.dx);
-    if (options.dy != null) edit.dy = Number(options.dy);
-    if (options.tracking != null) edit.tracking = Number(options.tracking);
-    const baseRun = {
-      family: options.family || entry.text.runs[0].family,
-      weight: Number(options.weight) || entry.text.runs[0].weight,
-      size: Number(options.sizePx) || entry.text.runs[0].size,
-      color: normalizeColor(options.color) || entry.text.runs[0].color,
-      tracking: options.tracking != null ? Number(options.tracking) : entry.text.runs[0].tracking
-    };
-    const runs = normalizeRuns(options.runs, baseRun);
-    if (runs) {
-      edit.runs = runs;
-    } else if (options.family || options.sizePx || options.weight || options.color) {
-      edit.runs = entry.text.runs.map((run) => ({ ...run, ...baseRun }));
+    const patch = pickOverride(options);
+    if (!Object.keys(patch).length) {
+      throw new Error(`Pass at least one of: ${TEXT_OVERRIDE_FIELDS.join(", ")}`);
     }
-    if (options.value !== void 0 && !edit.runs) {
-      edit.runs = [{ len: String(options.text).length, ...baseRun }];
-    }
-    const missing = (edit.runs || entry.text.runs).map((run) => run.family).filter((family) => family && !registeredFonts().includes(family));
+    const edit = { ...doc.textEdits.get(entry.id) || {}, ...patch, layer: entry.id };
+    const leaf = doc.leaves.find((item) => item.id === entry.leafId);
+    const pxPerPt = leaf ? pxPerPtOf(entry.text, (leaf.__raster || leaf).height) : 0;
+    const effective = mergeTextOverride(entry.text, edit, pxPerPt) || entry.text;
     doc.textEdits.set(entry.id, edit);
+    const missing = [...new Set(effective.runs.map((run) => run.family).filter(Boolean))].filter(
+      (family) => !GlobalFonts.has(family)
+    );
     return {
       layer: entry.name,
       entryId: entry.id,
-      value: edit.value !== void 0 ? edit.value : entry.text.value,
-      runs: (edit.runs || entry.text.runs).length,
-      warning: missing.length ? `Font not registered, the canvas will fall back: ${[...new Set(missing)].join(", ")}` : void 0
+      value: effective.value,
+      runs: effective.runs.map((run) => ({
+        len: run.len,
+        family: run.family,
+        weight: run.weight,
+        size: run.size,
+        sizePx: Math.round(run.size * pxPerPt * 100) / 100,
+        color: run.color
+      })),
+      ...missing.length ? { warning: `Font not registered, the canvas will fall back: ${missing.join(", ")}` } : {}
     };
   }
   if (action === "element") {
-    const files = [];
-    for (const item of options.paths || []) files.push(await resolveInWorkspace(cwd, item));
-    if (files.length === 0) throw new Error("Pass `paths` with one or more images");
-    const placed = [];
-    for (const file of files) {
-      const image = await loadImage(file);
-      const scale = Number(options.scale) > 0 ? Number(options.scale) : 1;
-      const rotation = Number(options.rotation) || 0;
-      const canvas = composeElement(image, { scale, rotation });
-      const element = {
-        name: options.name ? String(options.name) : path.basename(file, path.extname(file)),
-        source: path.relative(cwd, file),
-        canvas,
-        left: Number(options.dx) || 0,
-        top: Number(options.dy) || 0,
-        scale,
-        rotation,
-        opacity: options.opacity == null ? 1 : Math.max(0, Math.min(1, Number(options.opacity))),
-        blend: options.blend || "normal",
-        aboveSlots: options.aboveSlots !== false
-      };
-      doc.elements.push(element);
-      placed.push({ name: element.name, left: element.left, top: element.top, w: canvas.width, h: canvas.height });
+    if (!Array.isArray(options.paths) || options.paths.length === 0) {
+      throw new Error("Pass `paths` with one or more images");
     }
-    return { placed, total: doc.elements.length };
+    const loaded = [];
+    for (const source of options.paths) {
+      loaded.push(
+        await loadElement(cwd, {
+          source,
+          name: options.paths.length === 1 ? options.name : void 0,
+          left: options.dx,
+          top: options.dy,
+          scale: options.scale,
+          rotation: options.rotation,
+          opacity: options.opacity,
+          blend: options.blend,
+          aboveSlots: options.aboveSlots
+        })
+      );
+    }
+    doc.elements.push(...loaded);
+    return {
+      placed: loaded.map((element) => ({
+        name: element.name,
+        left: element.left,
+        top: element.top,
+        w: element.canvas.width,
+        h: element.canvas.height,
+        aboveSlots: element.aboveSlots
+      })),
+      total: doc.elements.length
+    };
   }
   if (action === "remelement") {
     const names = (options.names || []).map(String);
     if (names.length === 0) throw new Error("Pass `names` with the elements to remove");
     const before = doc.elements.length;
     doc.elements = doc.elements.filter((element) => !names.includes(element.name));
-    const removed = before - doc.elements.length;
-    return { removed, total: doc.elements.length, names: doc.elements.map((element) => element.name) };
+    return {
+      removed: before - doc.elements.length,
+      total: doc.elements.length,
+      names: doc.elements.map((element) => element.name)
+    };
   }
   if (action === "fonts") {
-    const result = await registerFontFiles(cwd, { dir: options.dir, paths: options.paths || options.fonts });
+    const paths = options.fonts || options.paths;
+    if (!options.dir && !(paths && paths.length)) throw new Error("Pass `dir` or `fonts` with font files to register");
+    const result = await registerFonts(cwd, { dir: options.dir, paths });
     return {
-      ...result,
-      registered: registeredFonts(),
-      missingFonts: unregisteredFamilies(doc)
+      loaded: result.registered,
+      skipped: result.skipped,
+      registered: [...registeredFamilies].sort(),
+      missingFonts: missingFamilies(doc)
     };
   }
   if (action === "save_project") {
     if (!options.project) throw new Error("Pass `project` with the JSON path to write");
     const projectPath = await resolveInWorkspace(cwd, options.project, { mustExist: false });
     await fs.mkdir(path.dirname(projectPath), { recursive: true });
+    await resolveInWorkspace(cwd, path.relative(cwd, projectPath), { mustExist: false });
     const data = serializeProject(doc, path.relative(cwd, absolute));
     await fs.writeFile(projectPath, JSON.stringify(data, null, 2));
-    return { project: path.relative(cwd, projectPath), textEdits: Object.keys(data.textEdits).length, elements: data.elements.length };
+    return {
+      project: path.relative(cwd, projectPath),
+      textEdits: Object.keys(data.textEdits).length,
+      elements: data.elements.length,
+      slots: data.slots
+    };
   }
   if (action === "load_project") {
     if (!options.project) throw new Error("Pass `project` with the JSON path to read");
     const projectPath = await resolveInWorkspace(cwd, options.project);
-    const project = JSON.parse(await fs.readFile(projectPath, "utf8"));
-    await applyProject(doc, cwd, project);
+    let project;
+    try {
+      project = JSON.parse(await fs.readFile(projectPath, "utf8"));
+    } catch (error) {
+      throw new Error(`Project file is not valid JSON: ${error.message || error}`);
+    }
+    const next = await readProject(doc, cwd, project);
+    doc.textEdits = next.textEdits;
+    doc.elements = next.elements;
+    doc.pinnedSlots = next.slots.length ? new Set(next.slots) : null;
+    if (next.slots.length) doc.slots = new Set(next.slots);
     return {
       project: path.relative(cwd, projectPath),
       textEdits: doc.textEdits.size,
       elements: doc.elements.length,
-      slots: [...doc.slots]
+      slots: currentSlots(doc),
+      missingFonts: missingFamilies(doc)
     };
   }
   if (action === "reset") {
     doc.textEdits = /* @__PURE__ */ new Map();
     doc.elements = [];
+    doc.pinnedSlots = null;
     return { ok: true, textEdits: 0, elements: 0 };
   }
-  throw new Error(`Unknown action: ${action}. Use status / text / element / remelement / fonts / save_project / load_project / reset`);
+  throw new Error(
+    `Unknown action: ${action}. Use status / text / element / remelement / fonts / save_project / load_project / reset`
+  );
 }
+var TEXT_RUN_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["len"],
+  properties: {
+    len: { type: "integer", description: "Character count of this run." },
+    family: { type: "string", description: "Font family or PostScript name." },
+    weight: { type: "number", description: "Font weight, 100-900." },
+    size: { type: "number", description: "Font size in PSD points." },
+    sizePx: { type: "number", description: "Font size in canvas pixels; wins over `size`." },
+    color: { type: "string", description: "Fill colour as #rrggbb." },
+    tracking: { type: "number", description: "Letter spacing in 1/1000 em, as in Photoshop." }
+  }
+};
+var TEXT_OVERRIDE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["layer"],
+  properties: {
+    layer: { type: "string", description: "Text layer name, entry id (e12) or leaf id (l3)." },
+    value: { type: "string", description: "New copy; characters keep their original styles." },
+    runs: { type: "array", items: TEXT_RUN_SCHEMA },
+    ...Object.fromEntries(
+      ["family", "weight", "size", "sizePx", "color", "tracking"].map((key) => [
+        key === "family" ? "font" : key,
+        TEXT_RUN_SCHEMA.properties[key]
+      ])
+    ),
+    align: { type: "string", enum: ["left", "center", "right"], description: "Paragraph alignment." },
+    leading: { type: "number", description: "Fixed line height in PSD points." },
+    dx: { type: "number", description: "Horizontal nudge in canvas pixels." },
+    dy: { type: "number", description: "Vertical nudge in canvas pixels." }
+  }
+};
 function registerTools(ctx) {
   const disposers = [];
   disposers.push(
@@ -17886,6 +18190,7 @@ function registerTools(ctx) {
                   leafId: { type: "string" },
                   bounds: { type: "array", items: { type: "integer" } },
                   textContent: { type: "string" },
+                  textAlign: { type: "string", enum: ["left", "center", "right"] },
                   runs: {
                     type: "array",
                     items: {
@@ -17941,7 +18246,7 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
   disposers.push(
     ctx.tools.register({
       name: "psd_batch_render",
-      description: "Render a PSD/PSB main-image template with many SKU images at once. Each SKU image is trimmed to its visible content, fitted into the product slots, composited between the template layers, and written as JPG/PNG into a workspace folder. Visible sibling layers that overlap a slot are suppressed together with the slot (reported as `suppressed`) so stale product art cannot show through. Returns the output folder and file names; optionally packs a ZIP.",
+      description: "Render a PSD/PSB main-image template with many SKU images at once. Each SKU image is trimmed to its visible content, fitted into the product slots, composited between the template layers, and written as JPG/PNG into a workspace folder. Visible sibling layers that overlap a slot are suppressed together with the slot (reported as `suppressed`) so stale product art cannot show through. Text layers can be rewritten per batch (`text`) or per SKU (`textBySku`) \u2014 re-rendered with real glyphs, not pasted pixels; register brand fonts first with `fontDir`. Returns the output folder and file names; optionally packs a ZIP.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -17964,6 +18269,20 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
             type: "array",
             items: { type: "string" },
             description: "Product slot layer names or leaf ids. Omit to use the auto-detected slots reported by psd_inspect."
+          },
+          text: {
+            type: "array",
+            description: "Rewrite text layers in every render: [{layer, value, runs, font, weight, size, sizePx, color, tracking, align, leading, dx, dy}]. `layer` is a layer name or leaf id; `value` replaces the copy (styles follow their characters); `runs` [{len, family?, weight?, size?, sizePx?, color?, tracking?}] restyle consecutive segments from the first character; flat font/weight/size/sizePx/color/tracking restyle all runs. `size` is in pt, exactly what psd_inspect reports; `sizePx` is in canvas pixels; color is #rrggbb. Wins over psd_edit text edits for the same layer.",
+            items: TEXT_OVERRIDE_SCHEMA
+          },
+          textBySku: {
+            type: "object",
+            additionalProperties: { type: "array", items: TEXT_OVERRIDE_SCHEMA },
+            description: "Per-SKU text overrides keyed by SKU file name (with or without extension), same shape as `text`; entries win over `text` per layer. Use it to give every SKU its own price."
+          },
+          fontDir: {
+            type: "string",
+            description: "Directory of .ttf/.otf font files to register before rendering. Registered family names (file stems) are returned in `fontsRegistered`."
           },
           outDir: {
             type: "string",
@@ -17994,7 +18313,7 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
         schema: {
           type: "object",
           additionalProperties: false,
-          required: ["count", "outDir", "files", "slots", "suppressed", "suppressedCount", "suppressedTruncated"],
+          required: ["count", "outDir", "files", "slots", "suppressed", "suppressedCount", "suppressedTruncated", "textVariants"],
           properties: {
             count: { type: "integer" },
             outDir: { type: "string" },
@@ -18027,14 +18346,21 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
               }
             },
             suppressedCount: { type: "integer" },
-            suppressedTruncated: { type: "boolean" }
+            suppressedTruncated: { type: "boolean" },
+            textVariants: { type: "integer" },
+            textWarnings: { type: "array", items: { type: "string" } },
+            fontsRegistered: { type: "array", items: { type: "string" } },
+            fontsSkipped: { type: "array", items: { type: "string" } }
           }
         },
         render: (_args, value) => [
           {
             type: "text",
             text: `Rendered ${value.count} image(s) into ${value.outDir} using ${value.slots.map((slot) => slot.name).join(", ")}${value.suppressed && value.suppressed.length ? `
-Suppressed overlapping slot siblings (hidden with the slot): ${value.suppressed.map((layer) => layer.name).join(", ")}${value.suppressedTruncated ? ` (+${value.suppressedCount - value.suppressed.length} more)` : ""}` : ""}${value.zip ? `
+Suppressed overlapping slot siblings (hidden with the slot): ${value.suppressed.map((layer) => layer.name).join(", ")}${value.suppressedTruncated ? ` (+${value.suppressedCount - value.suppressed.length} more)` : ""}` : ""}${value.textVariants ? `
+Text rewritten in ${value.textVariants} variant(s).` : ""}${value.fontsRegistered && value.fontsRegistered.length ? `
+Fonts registered: ${value.fontsRegistered.join(", ")}` : ""}${value.textWarnings && value.textWarnings.length ? `
+Text warnings: ${value.textWarnings.slice(0, 8).join("\uFF1B")}` : ""}${value.zip ? `
 ZIP: ${value.zip}` : ""}`
           }
         ]
@@ -18055,6 +18381,9 @@ ZIP: ${value.zip}` : ""}`
           anchor: args.anchor,
           fill: args.fill,
           adjustments: args.adjustments,
+          text: args.text,
+          textBySku: args.textBySku,
+          fontDir: args.fontDir,
           zip: args.zip
         });
       },
@@ -18065,7 +18394,7 @@ ZIP: ${value.zip}` : ""}`
   disposers.push(
     ctx.tools.register({
       name: "psd_edit",
-      description: "Edit a loaded PSD/PSB template before rendering: rewrite a text layer (whole layer or per-run styles, so a price line can mix two fonts and colours), place extra image layers on top of or below the product slot, register font files, and save or load the project so edits survive between sessions. Edits land on the cached document, so a following psd_batch_render uses them without re-parsing the PSD.",
+      description: "Edit a loaded PSD/PSB template before rendering: rewrite a text layer (same fields as one psd_batch_render `text` item, so a price line can mix two fonts, sizes and colours), place extra image layers above the product slot or between the background and the slot, register font files, and save or load the project so edits survive between sessions. Edits land on the cached document, so a following psd_batch_render uses them (its own `text`/`textBySku` still win per layer) and, after load_project, the project's slots when `slots` is omitted.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -18089,43 +18418,14 @@ ZIP: ${value.zip}` : ""}`
             ],
             description: "status: current edits, fonts and missing fonts. text: rewrite a text layer. element / remelement: add or remove placed images. fonts: register font files. save_project / load_project: persist edits. reset: drop every edit."
           },
+          // action=text: the same fields as one psd_batch_render `text` item.
+          ...TEXT_OVERRIDE_SCHEMA.properties,
           layer: {
             type: "string",
             description: "Text layer name, entry id (e12) or leaf id (l3). Required for action=text."
           },
-          text: {
-            type: "string",
-            description: "New copy. Keep the run lengths in step when you also pass `runs`."
-          },
-          runs: {
-            type: "array",
-            description: 'Per-run styles, one entry per contiguous character group with its `len`. Use it when one line mixes fonts, sizes or colours, e.g. [{len:1},{len:1,sizePx:138,color:"#CC3046"},{len:2}]. Omitted fields inherit the layer base style.',
-            items: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                len: { type: "number", description: "Character count of this run." },
-                family: { type: "string", description: "Font family to use for the run." },
-                weight: { type: "number", description: "Font weight, 100-900." },
-                sizePx: { type: "number", description: "Font size in canvas pixels." },
-                color: { type: "string", description: "Fill colour as #rrggbb." },
-                tracking: { type: "number", description: "Letter spacing in points." }
-              }
-            }
-          },
-          family: { type: "string", description: "Restyle the whole layer with this font family." },
-          weight: { type: "number", description: "Restyle the whole layer with this weight." },
-          sizePx: { type: "number", description: "Restyle the whole layer with this size in canvas pixels." },
-          color: { type: "string", description: "Restyle the whole layer with this fill colour (#rrggbb)." },
-          tracking: { type: "number", description: "Letter spacing, points." },
-          align: {
-            type: "string",
-            enum: ["left", "center", "right"],
-            description: "Paragraph alignment for the repainted layer."
-          },
-          leading: { type: "number", description: "Line height in points. Omit to keep the PSD value." },
-          dx: { type: "number", description: "Horizontal nudge in canvas pixels." },
-          dy: { type: "number", description: "Vertical nudge in canvas pixels." },
+          dx: { type: "number", description: "Horizontal offset in canvas pixels (text nudge, or element left)." },
+          dy: { type: "number", description: "Vertical offset in canvas pixels (text nudge, or element top)." },
           paths: {
             type: "array",
             description: "Images to place (relative paths). Required for action=element.",
@@ -18138,7 +18438,7 @@ ZIP: ${value.zip}` : ""}`
           blend: { type: "string", description: "Blend mode, e.g. multiply / screen / overlay." },
           aboveSlots: {
             type: "boolean",
-            description: "Draw the element above the product slot (default true). Set false to sit under it."
+            description: "Draw the element above everything (default true). Set false to place it directly under the lowest product slot, above the background."
           },
           names: {
             type: "array",

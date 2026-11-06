@@ -2,9 +2,5 @@
   "meta": {
     "title": "Main Image Batch Studio",
     "description": "Open-sourced by the VinkWork team at Genca (上海缙嘉科技有限公司). Open a PSD main-image template, mark product slots, drop in SKU cut-outs, fine-tune on canvas, and export every main image at once."
-  },
-  "action.loadFonts": "Load fonts",
-  "toast.fontsLoaded": "Loaded {n} font(s)",
-  "toast.notFont": "Only ttf / otf / ttc / woff files are supported",
-  "toast.fontsMissing": "Template needs fonts that are not loaded yet, text will fall back: {list}"
+  }
 }

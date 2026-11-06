@@ -48,12 +48,13 @@ out/0715-main/*.jpg（可选 ZIP）
 - **批量适配**：一次导入多张 PNG/JPG/WebP 抠图，自动裁掉透明边，按
   完整放入 / 按高度 / 按宽度 / 铺满裁切适配，并支持对齐和占比。
 - **画布微调**：拖动商品、拖角点缩放、数值调偏移/缩放/角度，可一键同步到全部 SKU。
-- **导出**：按模板原始分辨率输出 JPG/PNG，每个 SKU 一张，可打包 ZIP。
-- **文字重绘**：文字层不再只能用 PSD 里的栅格像素，可以在工具里改文案、换字体、改字号/颜色/字距/对齐，按原图层的框重画，位置和行数不变。
-- **逐段样式**：一条文案里可以混排（中文黑体 + 数字衬线红、不同字号），按 `{len, family, weight, sizePx, color, tracking}` 分段。
-- **字体注册**：导入字体文件即注册（同时用文件名和 PostScript 名两个别名），模板缺字体时明确告警，不静默回退。
-- **元素置入**：往模板里加赠品小图、道具等图片层，可设位置、缩放、旋转、不透明度、混合模式，并选择画在商品位上面或下面。
+- **文字替换**：价格条、活动文案等文字层可以整批或按 SKU 重写，按 PSD 里的样式段用真实字形重绘
+  （不是贴图）；可换字体、字号（pt 或 `sizePx` 像素）、颜色、字距、对齐、行距，面板里也能改，导入字体后预览与导出一致。
+- **逐段样式**：一条文案里可以混排（中文黑体 + 数字衬线红、不同字号），按 `{len, family, weight, size/sizePx, color, tracking}` 分段。
+- **字体注册**：导入字体文件即注册（文件名、PostScript 名、对应的系统字体名三个别名），模板缺字体时明确告警，不静默回退。
+- **元素置入**：往模板里加赠品小图、道具等图片层，可设位置、缩放、旋转、不透明度、混合模式，画在最上层，或背景之上、商品位之下。
 - **工程存档**：商品位、文字改动、元素、字体注册表存成 JSON，换机器或隔天继续。
+- **导出**：按模板原始分辨率输出 JPG/PNG，每个 SKU 一张，可打包 ZIP。
 - **Agent 工具**：`psd_inspect`、`psd_batch_render`、`psd_edit`，同一套内核在 Host 侧批量跑。
 - **本地优先**：PSD 解析和合成都在本机完成（页面内或 Host 进程），没有网络请求、没有埋点、不上传素材。
 
@@ -73,7 +74,7 @@ out/0715-main/*.jpg（可选 ZIP）
 plugin_manager install_bundle, target = dsh-psd-batch-studio
 ```
 
-固定版本用 `dsh-psd-batch-studio@0.2.4`。
+固定版本用 `dsh-psd-batch-studio@0.2.5`。
 
 也可以从 GitHub 安装：
 
@@ -93,7 +94,7 @@ npm install
 plugin_manager install_bundle, target = /绝对路径/dsh-psd-batch-studio
 ```
 
-安装后刷新 Harness 页面：侧边栏出现「主图批量替换」图标，agent 侧出现两个工具。
+安装后刷新 Harness 页面：侧边栏出现「主图批量替换」图标，agent 侧出现下面三个工具。
 
 `client.js` / `server.js` 已随仓库提交，安装不需要先构建；改源码后执行 `npm run build`。
 
@@ -110,9 +111,9 @@ plugin_manager install_bundle, target = /绝对路径/dsh-psd-batch-studio
 
 | 工具 | 作用 |
 | --- | --- |
-| `psd_inspect` | 返回模板尺寸、图层树（名称/层级/可见性/边界/图层 id）、自动识别的商品槽位；文字层额外返回文案和逐段字体样式（字体/字重/字号/颜色）。 |
-| `psd_batch_render` | 把一批 SKU 套进模板，输出 JPG/PNG（可选 ZIP）到工作区；结果里的 `suppressed` 列出随槽位一起隐藏的同组重叠图层。 |
-| `psd_edit` | 渲染前改模板：`text`（改文案、逐段样式、换字体）、`element` / `remelement`（加减图片层）、`fonts`（注册字体文件）、`save_project` / `load_project`（工程存档）、`status`、`reset`。改动落在缓存的文档上，随后的 `psd_batch_render` 直接生效。 |
+| `psd_inspect` | 返回模板尺寸、图层树（名称/层级/可见性/边界/图层 id）、自动识别的商品槽位；文字层额外返回文案、对齐和逐段字体样式（字体/字重/字号/颜色）。 |
+| `psd_batch_render` | 把一批 SKU 套进模板，输出 JPG/PNG（可选 ZIP）到工作区；支持 `text` / `textBySku` 重写文字层、`fontDir` 注册字体；结果里的 `suppressed` 列出随槽位一起隐藏的同组重叠图层。 |
+| `psd_edit` | 渲染前改模板：`text`（参数与 `psd_batch_render` 的一条 `text` 相同）、`element` / `remelement`（加减图片层）、`fonts`（注册字体文件）、`save_project` / `load_project`（工程存档，含商品位）、`status`、`reset`。改动落在缓存的文档上，随后的 `psd_batch_render` 直接生效，同层以渲染时传入的 `text` / `textBySku` 为准；载入工程后不传 `slots` 的渲染沿用工程里的商品位。 |
 
 调用示例：
 
@@ -131,13 +132,44 @@ plugin_manager install_bundle, target = /绝对路径/dsh-psd-batch-studio
 }
 ```
 
-两个工具的路径都相对当前会话工作目录解析，并拒绝越界路径。`psd_batch_render` 默认 JPG、质量 92，
+三个工具的路径都相对当前会话工作目录解析，并拒绝越界路径（写入路径按真实路径校验，符号链接不能指到工作区外）。`psd_batch_render` 默认 JPG、质量 92，
 返回输出目录和前 50 个文件名。
 
 槽位所在的组里，其它「可见且与槽位重叠 ≥25%」的图层会随槽位一起隐藏（旧商品图、没对齐的
 影子层最常见），否则新 SKU 会在旧商品的像素上叠加出「两个商品」。被隐藏的图层会在结果里以
 `suppressed` 列出；刻意的压在商品上的装饰请放到其他组里。近乎完全重叠且大小一致的堆叠副本
 （阴影/高光）仍走原有槽位簇逻辑，槽位适配框不受影响。
+
+### 文字替换
+
+文字层默认用 PSD 里的栅格像素；`text` / `textBySku` 会按 PSD 里的样式段用真实字形重绘：
+
+```json
+{
+  "template": "templates/summer-main.psd",
+  "skuDir": "skus/0715",
+  "fontDir": "fonts/618字体包",
+  "text": [
+    { "layer": "活动标题", "value": "618 大促" }
+  ],
+  "textBySku": {
+    "sku-001": [{ "layer": "价格数字", "value": "¥16.80",
+                  "runs": [{ "len": 3, "family": "DIN Alternate", "weight": 700 }, { "len": 3 }] }],
+    "sku-002": [{ "layer": "价格数字", "value": "¥19.90" }]
+  }
+}
+```
+
+- `layer` 写图层名或 leaf id；`value` 换文案（每个字继承原来的样式，最常用的「换价格」零配置）；
+  `runs` 从第一个字起按 `len` 依次改字体/字重/字号/颜色/字距，没写的属性和没覆盖到的字沿用原样式，
+  `size` 用 pt，与 `psd_inspect` 返回的逐段样式一一对应；
+  平铺的 `font`/`weight`/`size`/`color` 则作用于整层。
+- `textBySku` 按 SKU 文件名（带不带扩展名都行）给每个 SKU 单独的文字，同层覆盖 `text`；
+  相同文字组合的 SKU 归为一组共用一个场景，组渲染完立即释放画布，价格各不相同时内存不随 SKU 数增长，只是会慢一些。
+- `fontDir` 注册 ttf/otf/ttc 字体（注册名 = 文件名主干），注册清单回显在 `fontsRegistered`；
+  找不到的字体仍然会画（用回退字体），并在 `textWarnings` 里点名。
+- 面板工作台的「文字替换」区可以改同样的内容：文案输入框回车生效，`{}` 按钮编辑样式段 JSON
+  （与 `text` 参数同一格式），「字体」按钮导入本地字体文件后预览与导出一致。
 
 ## 构建
 
@@ -154,8 +186,10 @@ npm test
 
 ## 已知限制
 
-- 文字层默认仍用 PSD 里的栅格像素；调用 `psd_edit` 改过的那一层才会重绘。重绘的字距、行高按图层原来的框反推，极端字号（很小或极大）可能需要微调 `sizePx`。
-- 字体必须注册后才能重绘成目标字体。未注册时不报错也不静默假装成功：`psd_edit` 的返回值里带 `warning`，`status` 里的 `missingFonts` 会一直列出模板还需要哪些字体。
+- 文字层默认用 PSD 里的栅格像素；可用 `text` / `textBySku` 或 `psd_edit` 活字重写（见「文字替换」）。
+  字号按图层原来的框把 pt 换算成像素，`sizePx` 直接按像素画；极端字号可能需要微调。
+- 未注册的字体会用回退字体渲染：渲染结果的 `textWarnings`、`psd_edit` 的 `warning` 和 `status.missingFonts`
+  都会点名，不会静默。
 - 斜面和浮雕、内阴影为近似或跳过；描边/投影/发光为近似。
 - 一次处理一个模板；「多模板 × 多 SKU」矩阵尚未内置，换模板时 SKU 队列会保留。
 - 几百 MB 的 PSB 需要几百 MB 内存；建议用桌面端或 Host 批量路径。

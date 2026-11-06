@@ -8,7 +8,7 @@
  */
 import { readPsd } from 'ag-psd'
 import { createCanvas } from './canvas.js'
-import { renderTextEntry } from './text.js'
+import { describeTextLayer } from './text.js'
 
 const makeCanvas = createCanvas
 
@@ -90,160 +90,10 @@ export async function parseTemplate(file, onStage = () => {}) {
     hidden,
     slots: new Set(),
     size: file.size,
-    // Edits live on the document so a re-compose keeps them, and so a project
-    // file can round-trip them instead of re-deriving from the PSD.
-    textEdits: new Map(),
+    // Images placed by psd_edit; drawn through the same layer compositor.
     elements: [],
   }
 }
-
-/** PSD font names arrive squashed ("PingFangSC-Regular"); map the common ones. */
-const FONT_FAMILY_MAP = [
-  [/^PingFangSC/i, 'PingFang SC'],
-  [/^PingFang/i, 'PingFang SC'],
-  [/^HiraginoSansGB/i, 'Hiragino Sans GB'],
-  [/^MicrosoftYaHei/i, 'Microsoft YaHei'],
-  [/^MicrosoftJhengHei/i, 'Microsoft JhengHei'],
-  [/^(SourceHanSans|SourceHanSansCN|NotoSansSC|NotoSansCJK)/i, 'Noto Sans SC'],
-  [/^SourceHanSerif/i, 'Noto Serif SC'],
-  [/^SimHei|^STHeiti/i, 'Heiti SC'],
-  [/^SimSun|^STSong/i, 'Songti SC'],
-  [/^AlibabaPuHuiTi/i, 'Alibaba PuHuiTi'],
-  [/^OPPOSans/i, 'OPPO Sans'],
-  [/^HarmonyOS/i, 'HarmonyOS Sans'],
-  [/^DIN/i, 'DIN Alternate'],
-  [/^ArialMT|^Arial/i, 'Arial'],
-  [/^HelveticaNeue|^Helvetica/i, 'Helvetica Neue'],
-  [/^Inter/i, 'Inter'],
-  [/^Roboto/i, 'Roboto'],
-]
-
-function fontFamilyOf(name) {
-  const raw = String(name || '').replace(/^#/, '').trim()
-  if (!raw) return null
-  for (const [pattern, family] of FONT_FAMILY_MAP) {
-    if (pattern.test(raw)) return family
-  }
-  // PSD stores PostScript names (GlowSansSC-Normal-Medium, MiSans-Medium) and
-  // fonts are registered under the file stem, which is that same name. Cutting
-  // it to "GlowSansSC" / "MiSans" matches neither the registered face nor the
-  // system family, so every layer would fall back without a word.
-  return raw
-}
-
-function fontWeightOf(name, fauxBold) {
-  const raw = String(name || '').toLowerCase()
-  if (/heavy|black|extrabold|ultrabold/.test(raw)) return 800
-  if (/semibold|demibold|bold/.test(raw)) return 700
-  if (/medium/.test(raw)) return 500
-  if (/light|thin/.test(raw)) return 300
-  return fauxBold ? 700 : 400
-}
-
-// ag-psd decodes text fill colors as {r,g,b}, grayscale {k} or CMYK {c,m,y,k},
-// all scaled 0-255 depending on the document's color mode.
-function fillColorOf(fill) {
-  if (!fill) return [0, 0, 0]
-  if (fill.r != null) {
-    return [Math.round(fill.r ?? 0), Math.round(fill.g ?? 0), Math.round(fill.b ?? 0)]
-  }
-  if (fill.k != null && fill.c == null) {
-    const value = Math.round(fill.k)
-    return [value, value, value]
-  }
-  if (fill.c != null) {
-    const c = (fill.c ?? 0) / 255
-    const m = (fill.m ?? 0) / 255
-    const y = (fill.y ?? 0) / 255
-    const k = (fill.k ?? 0) / 255
-    return [
-      Math.round(255 * (1 - c) * (1 - k)),
-      Math.round(255 * (1 - m) * (1 - k)),
-      Math.round(255 * (1 - y) * (1 - k)),
-    ]
-  }
-  return [0, 0, 0]
-}
-
-function describeTextStyle(raw) {
-  const style = raw || {}
-  return {
-    family: fontFamilyOf(style.font ? style.font.name : ''),
-    weight: fontWeightOf(style.font ? style.font.name : '', style.fauxBold),
-    size: Math.round((style.fontSize || 0) * 100) / 100,
-    color: fillColorOf(style.fillColor),
-    tracking: style.tracking || 0,
-  }
-}
-
-// styleRuns only carry the fields that differ from the base style, so each run
-// must be merged over it. Flags absent from the run (like fauxBold) inherit
-// from the PSD base style, so a font-only override keeps its weight.
-function mergeTextStyle(base, raw, baseStyle) {
-  const style = (raw && raw.style) || {}
-  const has = (key) => style[key] !== undefined && style[key] !== null
-  const merged = { ...base }
-  if (has('font') && style.font && style.font.name) {
-    merged.family = fontFamilyOf(style.font.name)
-    merged.weight = fontWeightOf(style.font.name, has('fauxBold') ? style.fauxBold : baseStyle?.fauxBold)
-  } else if (has('fauxBold')) {
-    merged.weight = fontWeightOf(merged.family, style.fauxBold)
-  }
-  if (has('fontSize') && style.fontSize > 0) merged.size = Math.round(style.fontSize * 100) / 100
-  if (has('fillColor') && style.fillColor) {
-    merged.color = [
-      Math.round(style.fillColor.r ?? 0),
-      Math.round(style.fillColor.g ?? 0),
-      Math.round(style.fillColor.b ?? 0),
-    ]
-  }
-  if (has('tracking')) merged.tracking = style.tracking
-  return merged
-}
-
-/**
- * Summarize a text layer: its content plus one style entry per run, so an
- * agent can see what a price layer looks like before rendering anything.
- */
-function describeTextLayer(text) {
-  const style = Array.isArray(text.style) ? text.style[0] : text.style || {}
-  const base = describeTextStyle(style)
-  const value = String(text.text || '').replace(/\r$/, '').replace(/\r/g, '\n')
-  const runs = []
-  for (const run of text.styleRuns || []) {
-    const length = Math.max(0, Math.round(run.length || 0))
-    if (!length) continue
-    runs.push({ len: length, ...mergeTextStyle(base, run, style) })
-  }
-  let total = runs.reduce((sum, run) => sum + run.len, 0)
-  if (total !== value.length && runs.length) {
-    if (total < value.length) {
-      runs.push({ len: value.length - total, ...base })
-    } else {
-      let left = value.length
-      for (let index = 0; index < runs.length && left > 0; index += 1) {
-        runs[index].len = Math.min(runs[index].len, left)
-        left -= runs[index].len
-      }
-      while (runs.length && runs[runs.length - 1].len <= 0) runs.pop()
-    }
-    total = runs.reduce((sum, run) => sum + run.len, 0)
-  }
-  if (!runs.length && value.length) runs.push({ len: value.length, ...base })
-  const paragraph = style.paragraphStyle || {}
-  const leading = Number(style.leading) || 0
-  return {
-    value,
-    runs,
-    align: paragraph.align != null ? PARAGRAPH_ALIGN[paragraph.align] || 'left' : 'left',
-    leading,
-    autoLeading: style.autoLeading !== false,
-    fontSize: base.size,
-  }
-}
-
-// ag-psd keeps the Photoshop enum: 0 left, 1 right, 2 center, 3 justify.
-const PARAGRAPH_ALIGN = { 0: 'left', 1: 'right', 2: 'center', 3: 'justify' }
 
 function buildTree(psd) {
   const entries = []
@@ -648,86 +498,56 @@ function isStackedCopy(base, other, doc) {
  */
 const SLOT_SIBLING_OVERLAP = 0.25
 
+/** Placed images as leaves, so they ride through the layer compositor. */
+function elementLeaves(doc) {
+  return (doc.elements || [])
+    .filter((element) => element.canvas)
+    .map((element, index) => ({
+      id: `x${index}`,
+      entryId: null,
+      name: element.name || `元素 ${index + 1}`,
+      left: Math.round(element.left || 0),
+      top: Math.round(element.top || 0),
+      width: element.canvas.width,
+      height: element.canvas.height,
+      canvas: element.canvas,
+      mask: null,
+      opacity: element.opacity == null ? 1 : element.opacity,
+      blendMode: element.blend || 'normal',
+      clipping: false,
+      effects: null,
+      path: [],
+      isElement: true,
+      aboveSlots: element.aboveSlots !== false,
+    }))
+}
+
+/**
+ * The PSD stack with placed elements folded in. Elements above the slots go
+ * on top of everything; elements below go directly under the lowest slot, so
+ * they stay above the background instead of vanishing under it. Without a
+ * slot they sit right above the bottom layer.
+ */
+function stackWithElements(doc, leaves) {
+  const elements = elementLeaves(doc)
+  if (!elements.length) return leaves
+  const above = elements.filter((element) => element.aboveSlots)
+  const below = elements.filter((element) => !element.aboveSlots)
+  let at = leaves.findIndex((leaf) => doc.slots.has(leaf.id))
+  if (at < 0) at = Math.min(1, leaves.length)
+  return [...leaves.slice(0, at), ...below, ...leaves.slice(at), ...above]
+}
+
 /**
  * Split the visible layer stack into background runs and product slots.
  *
  * @returns {{parts: Array<object>, slots: Array<object>, suppressed: Array<object>, width: number, height: number}}
  */
-/**
- * Replace a text leaf's raster pixels with a repaint of its (possibly edited)
- * copy. The layer keeps its own opacity, blend mode and effects, so only the
- * pixels change; the box stays where the designer put it unless the edit moves
- * it explicitly.
- */
-function applyTextEdit(doc, leaf) {
-  if (!leaf.isText || !doc.textEdits || doc.textEdits.size === 0) return leaf
-  const edit = doc.textEdits.get(leaf.entryId)
-  if (!edit) return leaf
-  const entry = doc.entries.find((item) => item.id === leaf.entryId)
-  if (!entry || !entry.text) return leaf
-
-  const text = {
-    ...entry.text,
-    ...(edit.value !== undefined ? { value: edit.value } : null),
-    ...(edit.runs ? { runs: edit.runs } : null),
-    ...(edit.leading !== undefined ? { leading: edit.leading } : null),
-    ...(edit.align !== undefined ? { align: edit.align } : null),
-  }
-  if (!Array.isArray(text.runs) || text.runs.length === 0) {
-    text.runs = [{ len: String(text.value).length, ...{ size: edit.sizePx || entry.text.fontSize || 12, family: edit.family || 'PingFang SC', weight: edit.weight || 400, color: edit.color || [0, 0, 0], tracking: edit.tracking || 0 } }]
-  }
-
-  const rendered = renderTextEntry(
-    { ...entry, text },
-    { align: edit.align, tracking: edit.tracking },
-  )
-  if (!rendered || !rendered.canvas) return leaf
-
-  return {
-    ...leaf,
-    canvas: rendered.canvas,
-    width: rendered.canvas.width,
-    height: rendered.canvas.height,
-    left: rendered.left + (edit.dx || 0),
-    top: rendered.top + (edit.dy || 0),
-    edited: true,
-  }
-}
-
-/** Same shape as a leaf, so placed elements ride through the layer compositor. */
-function elementLeaves(doc) {
-  return (doc.elements || []).map((element, index) => ({
-    id: `x${index}`,
-    entryId: null,
-    name: element.name || `元素 ${index + 1}`,
-    left: element.left || 0,
-    top: element.top || 0,
-    width: element.canvas.width,
-    height: element.canvas.height,
-    canvas: element.canvas,
-    mask: null,
-    opacity: element.opacity == null ? 1 : element.opacity,
-    blendMode: element.blend || 'normal',
-    clipping: false,
-    effects: null,
-    isText: false,
-    isElement: true,
-    path: [],
-    aboveSlots: element.aboveSlots !== false,
-  }))
-}
-
 export function buildScene(doc) {
-  const stacked = []
-  const below = []
-  const above = []
-  for (const element of elementLeaves(doc)) (element.aboveSlots ? above : below).push(element)
-
-  const visibleLeaves = [
-    ...below,
-    ...doc.leaves.filter((leaf) => isLeafVisible(doc, leaf)).map((leaf) => applyTextEdit(doc, leaf)),
-    ...above,
-  ]
+  const visibleLeaves = stackWithElements(
+    doc,
+    doc.leaves.filter((leaf) => isLeafVisible(doc, leaf)),
+  )
   const entryById = new Map(doc.entries.map((entry) => [entry.id, entry]))
   const clusters = []
   const clusterOf = new Map()
@@ -741,16 +561,20 @@ export function buildScene(doc) {
     if (!doc.slots.has(leaf.id) || claimed.has(leaf.id)) continue
     claimed.add(leaf.id)
     let rect = leafBounds(leaf)
+    // A copy that widens the fit rect is product art too: it must join the
+    // cluster so the draw pass skips it, or it paints over the SKU.
+    const members = new Set([leaf.id])
     for (const other of visibleLeaves) {
-      if (claimed.has(other.id) || doc.slots.has(other.id)) continue
+      if (claimed.has(other.id) || doc.slots.has(other.id) || other.isElement) continue
       if (!isStackedCopy(leaf, other, doc)) continue
       claimed.add(other.id)
+      members.add(other.id)
       rect = unionBounds(rect, leafBounds(other))
     }
     const cluster = {
       id: leaf.id,
       name: leaf.name,
-      members: new Set([leaf.id]),
+      members,
       rect: {
         x: rect.left,
         y: rect.top,
@@ -775,7 +599,7 @@ export function buildScene(doc) {
     const parent = entryById.get(leaf.entryId)?.parentId
     if (!parent) continue
     for (const other of visibleLeaves) {
-      if (claimed.has(other.id) || doc.slots.has(other.id)) continue
+      if (claimed.has(other.id) || doc.slots.has(other.id) || other.isElement) continue
       if (!other.path.includes(parent)) continue
       if (boundsOverlapRatio(leafBounds(leaf), leafBounds(other)) < SLOT_SIBLING_OVERLAP) continue
       cluster.members.add(other.id)

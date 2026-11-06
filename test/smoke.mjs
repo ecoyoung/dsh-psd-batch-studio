@@ -9,11 +9,12 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { createCanvas, loadImage } from '@napi-rs/canvas'
+import { createCanvas } from '@napi-rs/canvas'
 import { writePsd } from 'ag-psd'
 
 import { parseTemplate, buildScene, suggestSlots } from '../src/core/psd.js'
 import { editTemplate, inspectTemplate, renderBatch } from '../src/server.js'
+import { mergeOverrideLists, mergeTextOverride, readFontPostScriptName } from '../src/core/text.js'
 
 // Importing src/server.js installs the ag-psd/@napi-rs canvas factory.
 
@@ -193,8 +194,8 @@ async function main() {
   await fs.writeFile(path.join(cwd, 'zorder.psd'), Buffer.from(buildZOrderPsd()))
   await fs.writeFile(path.join(cwd, 'shadow-steal.psd'), Buffer.from(buildShadowStealPsd()))
   await fs.writeFile(path.join(cwd, 'sku.png'), await sku.encode('png'))
-  const badge = fillCanvas(40, 40, '#00ff00')
-  await fs.writeFile(path.join(cwd, 'badge.png'), await badge.encode('png'))
+  await fs.writeFile(path.join(cwd, 'badge.png'), await fillCanvas(40, 40, '#00ff00').encode('png'))
+  const outside = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'psd-studio-outside-')))
 
   try {
     // --- psd_inspect: text layers report copy and per-run styles ----------
@@ -268,6 +269,27 @@ async function main() {
     const staleRemainder = outputCtx.getImageData(570, 400, 1, 1).data
     assert.ok(Math.abs(staleRemainder[0] - 204) < 10, '旧图 pixels outside the slot are suppressed')
 
+    // --- regression: a stacked copy above the slot never covers the SKU ----
+    // 产品位阴影 (#000088) sits above 产品位 and widens the fit rect; it is
+    // product art and must be hidden with the slot, not drawn over the SKU.
+    const copyRender = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png'],
+      outDir: 'out-copy',
+      format: 'png',
+    })
+    const copyCanvas = createCanvas(800, 800)
+    const copyCtx = copyCanvas.getContext('2d')
+    copyCtx.drawImage(await loadImageFrom(path.join(cwd, 'out-copy', copyRender.files[0])), 0, 0)
+    for (const [x, y] of [[400, 420], [300, 300], [500, 580]]) {
+      const pixel = copyCtx.getImageData(x, y, 1, 1).data
+      assert.ok(
+        pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60,
+        `SKU red at (${x},${y}), not the stacked copy (got ${pixel[0]},${pixel[1]},${pixel[2]})`,
+      )
+    }
+
     // --- regression: slot part stays at the slot layer's stack position ---
     const zDoc = await parseFixture(cwd, 'zorder.psd')
     const slotLeaf = zDoc.leaves.find((leaf) => leaf.name === '槽位')
@@ -309,121 +331,376 @@ async function main() {
     assert.equal(slotB.rect.w, 282)
     assert.equal(slotB.rect.h, 382)
 
-    // --- font names keep their PostScript form --------------------------
-    const selling = inspect.layers.find((layer) => layer.name === '卖点')
-    assert.ok(selling, 'PostScript-named text layer listed')
-    assert.equal(
-      selling.runs[0].family,
-      'GlowSansSC-Normal-Medium',
-      'a PostScript font name is not truncated to its family head',
+    // --- text overrides: global rewrite with live glyphs -------------------
+    const baseline = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png'],
+      outDir: 'out-base',
+      format: 'png',
+    })
+    const overridden = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png'],
+      outDir: 'out',
+      format: 'png',
+      text: [
+        {
+          layer: '价格',
+          value: '¥88.80',
+          runs: [{ len: 3, color: '#0033cc' }, { len: 1, family: 'NoSuchFont' }, { len: 2 }],
+        },
+      ],
+    })
+    assert.equal(overridden.count, 1)
+    assert.equal(overridden.textVariants, 1)
+    assert.ok(
+      overridden.textWarnings.some((warning) => warning.includes('NoSuchFont')),
+      'unresolvable fonts are reported as fallback warnings',
     )
 
-    // --- psd_edit: text repaint replaces the rasterised pixels -----------
+    // PNG keeps pixels exact: the price region must change when the copy is
+    // rewritten with live glyphs.
+    const beforeCanvas = createCanvas(800, 800)
+    const beforeCtx = beforeCanvas.getContext('2d')
+    beforeCtx.drawImage(await loadImageFrom(path.join(cwd, 'out-base', baseline.files[0])), 0, 0)
+    outputCtx.drawImage(await loadImageFrom(path.join(cwd, 'out', overridden.files[0])), 0, 0)
+    let changed = 0
+    for (let y = 690; y < 775; y += 3) {
+      for (let x = 95; x < 305; x += 3) {
+        const a = beforeCtx.getImageData(x, y, 1, 1).data
+        const b = outputCtx.getImageData(x, y, 1, 1).data
+        if (Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]) > 24) changed += 1
+      }
+    }
+    assert.ok(changed > 50, `price region repainted by the override (${changed} sampled pixels)`)
+
+    // The decoration and background must survive the text machinery.
+    const badgeAfterText = outputCtx.getImageData(70, 60, 1, 1).data
+    assert.ok(badgeAfterText[0] > 240, '角标 still rendered after text override')
+
+    // --- per-SKU overrides: two SKUs, two prices, two scenes ---------------
+    await fs.rm(path.join(cwd, 'out'), { recursive: true, force: true })
+    const skuB = fillCanvas(300, 400, '#20b020', 25, 25, 250, 350)
+    await fs.writeFile(path.join(cwd, 'sku-b.png'), await skuB.encode('png'))
+    const perSku = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png', 'sku-b.png'],
+      outDir: 'out',
+      format: 'png',
+      textBySku: {
+        'sku.png': [{ layer: '价格', value: '¥11.00' }],
+        'sku-b.png': [{ layer: '价格', value: '¥22.00' }],
+      },
+    })
+    assert.equal(perSku.count, 2)
+    assert.equal(perSku.textVariants, 2, 'one scene per distinct price')
+    const [first, second] = await Promise.all(
+      perSku.files.slice(0, 2).map((name) => fs.readFile(path.join(cwd, 'out', name))),
+    )
+    assert.ok(first.equals(second) === false, 'per-SKU text produces different images')
+
+    // --- fontDir: registering real fonts removes the fallback warning ------
+    const fontDir = path.join(cwd, 'fonts')
+    await fs.mkdir(fontDir, { recursive: true })
+    let fontFile = null
+    for (const candidate of [
+      '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
+      '/System/Library/Fonts/Supplemental/Arial.ttf',
+    ]) {
+      try {
+        await fs.copyFile(candidate, path.join(fontDir, 'TestFont_Bold.ttf'))
+        fontFile = candidate
+        break
+      } catch {
+        /* candidate not present on this machine */
+      }
+    }
+    if (fontFile) {
+      const withFonts = await renderBatch({
+        cwd,
+        template: 'fixture.psd',
+        skus: ['sku.png'],
+        outDir: 'out',
+        format: 'png',
+        fontDir: 'fonts',
+        text: [{ layer: '价格', value: '¥66.00', font: 'TestFont Bold' }],
+      })
+      assert.ok(
+        withFonts.fontsRegistered && withFonts.fontsRegistered.includes('TestFont Bold'),
+        'registered family names reported',
+      )
+      assert.ok(
+        !(withFonts.textWarnings || []).some((warning) => warning.includes('TestFont Bold')),
+        'registered font resolves without fallback warning',
+      )
+    }
+
+    // --- regression: runs keep their requested lengths ---------------------
+    const priceBase = (await parseFixture(cwd, 'fixture.psd')).entries.find((entry) => entry.name === '价格').text
+    const split = mergeTextOverride(priceBase, {
+      value: '8888',
+      runs: [{ len: 1, color: '#ff0000' }, { len: 3, color: '#0000ff' }],
+    })
+    assert.deepEqual(split.runs.map((run) => run.len), [1, 3], 'runs keep the requested [1, 3] split')
+    assert.deepEqual(split.runs.map((run) => run.color), [[255, 0, 0], [0, 0, 255]])
+    // A segment restyles only its own characters; the rest keep their style.
+    const partial = mergeTextOverride(priceBase, { runs: [{ len: 1, color: '#00ff00' }] })
+    assert.deepEqual(partial.runs[0], { ...priceBase.runs[0], len: 1, color: [0, 255, 0] })
+    assert.equal(partial.runs.reduce((sum, run) => sum + run.len, 0), priceBase.value.length)
+    assert.deepEqual(partial.runs[partial.runs.length - 1].size, 28, 'tail keeps its 28pt style')
+
+    const twoTone = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png'],
+      outDir: 'out-two-tone',
+      format: 'png',
+      text: [{ layer: '价格', value: '8888', runs: [{ len: 1, color: '#ff0000' }, { len: 3, color: '#0000ff' }] }],
+    })
+    const toneCanvas = createCanvas(800, 800)
+    const toneCtx = toneCanvas.getContext('2d')
+    toneCtx.drawImage(await loadImageFrom(path.join(cwd, 'out-two-tone', twoTone.files[0])), 0, 0)
+    // Stay left of the red CMYK价 raster at x 420.
+    const tone = toneCtx.getImageData(0, 660, 400, 140).data
+    let red = 0
+    let blue = 0
+    for (let index = 0; index < tone.length; index += 4) {
+      const [r, g, b] = [tone[index], tone[index + 1], tone[index + 2]]
+      if (r > 200 && g < 60 && b < 60) red += 1
+      if (b > 200 && r < 60 && g < 60) blue += 1
+    }
+    assert.ok(red > 30, `first glyph renders red (${red} px)`)
+    assert.ok(blue > red, `last three glyphs render blue (${blue} px vs ${red} red)`)
+
+    // --- per-SKU groups: interleaved prices keep input order, one scene each
+    await fs.writeFile(path.join(cwd, 'sku-c.png'), await skuB.encode('png'))
+    const grouped = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png', 'sku-b.png', 'sku-c.png'],
+      outDir: 'out-grouped',
+      format: 'png',
+      zip: true,
+      textBySku: {
+        'sku.png': [{ layer: '价格', value: '¥11.00' }],
+        'sku-b.png': [{ layer: '价格', value: '¥22.00' }],
+        'sku-c.png': [{ layer: '价格', value: '¥11.00' }],
+      },
+    })
+    assert.equal(grouped.textVariants, 2, 'SKUs sharing a price share one scene')
+    assert.deepEqual(grouped.files, ['sku.png', 'sku-b.png', 'sku-c.png'], 'output keeps input order')
+    const [groupA, groupC] = await Promise.all(
+      ['sku.png', 'sku-c.png'].map((name) => fs.readFile(path.join(cwd, 'out-grouped', name))),
+    )
+    assert.ok(!groupA.equals(groupC), 'different SKU images still differ inside one text group')
+    assert.ok(grouped.zip, 'zip written for grouped batch')
+
+    // --- override list merge: per-SKU wins per layer ------------------------
+    const merged = mergeOverrideLists([{ layer: 'a', value: '1' }, { layer: 'b', value: '2' }], [
+      { layer: 'b', value: '3' },
+    ])
+    assert.deepEqual(
+      merged.map((override) => `${override.layer}=${override.value}`),
+      ['a=1', 'b=3'],
+    )
+
+    // === psd_edit ==========================================================
+    // Edits persist on the cached document, so these run after every render
+    // above that expects the pristine template.
+    const pngOf = async (dir, name) => {
+      const canvas = createCanvas(800, 800)
+      const ctx = canvas.getContext('2d')
+      ctx.drawImage(await loadImageFrom(path.join(cwd, dir, name)), 0, 0)
+      return ctx
+    }
+    const renderPng = (outDir, extra = {}) =>
+      renderBatch({ cwd, template: 'fixture.psd', skus: ['sku.png'], outDir, format: 'png', ...extra })
+
+    // --- font names keep their PostScript form ----------------------------
+    const selling = inspect.layers.find((layer) => layer.name === '卖点')
+    assert.equal(selling.runs[0].family, 'GlowSansSC-Normal-Medium', 'PostScript font name is not truncated')
+
+    // --- text edit: shared override shape, repaint replaces the raster -----
     const edit = await editTemplate({
       cwd,
       template: 'fixture.psd',
       action: 'text',
       layer: '价格',
-      text: '¥9.90',
-      runs: [
-        { len: 1 },
-        { len: 1, sizePx: 56, color: '#CC3046' },
-        { len: 4 },
-      ],
+      value: '¥9.90',
+      runs: [{ len: 1 }, { len: 1, sizePx: 56, color: '#CC3046' }, { len: 3 }],
     })
     assert.equal(edit.value, '¥9.90')
-    assert.equal(edit.runs, 3)
-    // The fixture uses a font that is never registered here.
-    assert.match(String(edit.warning || ''), /fall back/, 'unregistered font is reported, not silent')
+    assert.deepEqual(edit.runs.map((run) => run.len), [1, 1, 3])
+    assert.equal(edit.runs[1].sizePx, 56, 'sizePx lands as exactly that many pixels')
+    assert.deepEqual(edit.runs[1].color, [204, 48, 70])
+    const editedCtx = await pngOf('out-edit', (await renderPng('out-edit')).files[0])
+    const corner = editedCtx.getImageData(106, 704, 1, 1).data
+    assert.ok(!(corner[0] === 200 && corner[1] === 20 && corner[2] === 20), 'old solid price raster is gone')
 
-    const repainted = await renderBatch({
-      cwd,
-      template: 'fixture.psd',
-      skus: ['sku.png'],
-      outDir: 'out-text',
-      format: 'png',
-    })
-    const textCanvas = createCanvas(800, 800)
-    const textCtx = textCanvas.getContext('2d')
-    textCtx.drawImage(await loadImage(path.join(cwd, 'out-text', repainted.files[0])), 0, 0)
-    const corner = textCtx.getImageData(106, 704, 1, 1).data
-    assert.ok(
-      corner[0] > 200 && corner[1] > 200 && corner[2] > 200,
-      'the old solid price raster is gone after the repaint',
-    )
+    // A render's own `text` still wins over the saved edit for that layer.
+    const wins = await renderPng('out-edit-wins', { text: [{ layer: '价格', value: '¥1' }] })
+    assert.equal(wins.textVariants, 1)
 
-    // --- psd_edit: element placement above the slot ----------------------
+    // --- regression: sizePx is not cancelled out on a single run -----------
+    const inkHeight = (ctx) => {
+      // Below the red SKU (ends at y 612), left of the red CMYK价 raster (x 420).
+      const data = ctx.getImageData(0, 640, 420, 160).data
+      let top = Infinity
+      let bottom = -Infinity
+      for (let index = 0; index < data.length; index += 4) {
+        const [r, g, b] = [data[index], data[index + 1], data[index + 2]]
+        if (r > 120 && g < 90 && b < 90) {
+          const y = Math.floor(index / 4 / 420)
+          top = Math.min(top, y)
+          bottom = Math.max(bottom, y)
+        }
+      }
+      return bottom - top + 1
+    }
+    const heights = {}
+    for (const sizePx of [20, 50]) {
+      await editTemplate({ cwd, template: 'fixture.psd', action: 'reset' })
+      await editTemplate({
+        cwd,
+        template: 'fixture.psd',
+        action: 'text',
+        layer: '价格',
+        value: '88',
+        runs: [{ len: 2, sizePx }],
+      })
+      heights[sizePx] = inkHeight(await pngOf(`out-px-${sizePx}`, (await renderPng(`out-px-${sizePx}`)).files[0]))
+    }
+    const ratio = heights[50] / heights[20]
+    assert.ok(ratio > 2 && ratio < 3, `50px glyphs are ~2.5× the 20px ones (${heights[20]} → ${heights[50]})`)
+    // Flat sizePx behaves the same as a run-level one.
+    await editTemplate({ cwd, template: 'fixture.psd', action: 'reset' })
+    await editTemplate({ cwd, template: 'fixture.psd', action: 'text', layer: '价格', value: '88', sizePx: 50 })
+    const flat = inkHeight(await pngOf('out-px-flat', (await renderPng('out-px-flat')).files[0]))
+    assert.ok(Math.abs(flat - heights[50]) <= 1, `flat sizePx matches run sizePx (${flat} vs ${heights[50]})`)
+    await editTemplate({ cwd, template: 'fixture.psd', action: 'reset' })
+
+    // --- elements: above everything, or between background and slot -------
+    await editTemplate({ cwd, template: 'fixture.psd', action: 'element', paths: ['badge.png'], name: 'top', dx: 600, dy: 600 })
     await editTemplate({
       cwd,
       template: 'fixture.psd',
       action: 'element',
       paths: ['badge.png'],
-      dx: 600,
-      dy: 600,
-      aboveSlots: true,
+      name: 'under',
+      dx: 650,
+      dy: 300,
+      aboveSlots: false,
     })
-    const placed = await renderBatch({
+    await editTemplate({
       cwd,
       template: 'fixture.psd',
-      skus: ['sku.png'],
-      outDir: 'out-element',
-      format: 'png',
+      action: 'element',
+      paths: ['badge.png'],
+      name: 'behind-sku',
+      dx: 380,
+      dy: 400,
+      aboveSlots: false,
     })
-    const elementCanvas = createCanvas(800, 800)
-    const elementCtx = elementCanvas.getContext('2d')
-    elementCtx.drawImage(await loadImage(path.join(cwd, 'out-element', placed.files[0])), 0, 0)
-    const green = elementCtx.getImageData(620, 620, 1, 1).data
-    assert.ok(green[1] > 240 && green[0] < 40, 'placed element renders at its offset')
+    const elementCtx = await pngOf('out-element', (await renderPng('out-element')).files[0])
+    const isGreen = (pixel) => pixel[1] > 240 && pixel[0] < 40 && pixel[2] < 40
+    assert.ok(isGreen(elementCtx.getImageData(620, 620, 1, 1).data), 'above-slot element renders')
+    // Regression: below-slot elements sit above the opaque background.
+    assert.ok(isGreen(elementCtx.getImageData(670, 320, 1, 1).data), 'below-slot element stays above the background')
+    const behind = elementCtx.getImageData(400, 420, 1, 1).data
+    assert.ok(behind[0] > 200 && behind[1] < 60, 'below-slot element is covered by the SKU')
+    const elementStatus = await editTemplate({ cwd, template: 'fixture.psd', action: 'remelement', names: ['behind-sku'] })
+    assert.deepEqual(elementStatus.names, ['top', 'under'])
 
-    // --- psd_edit: project round-trip -----------------------------------
-    await editTemplate({ cwd, template: 'fixture.psd', action: 'save_project', project: 'project.json' })
+    // --- project round trip, including slots -------------------------------
+    await editTemplate({ cwd, template: 'fixture.psd', action: 'text', layer: '价格', value: '¥9.90' })
+    // Pick a slot the auto detection would not choose, via an explicit render.
+    await renderPng('out-slot', { slots: ['角标'] })
+    const saved = await editTemplate({ cwd, template: 'fixture.psd', action: 'save_project', project: 'p/project.json' })
+    assert.equal(saved.textEdits, 1)
+    assert.equal(saved.elements, 2)
     await editTemplate({ cwd, template: 'fixture.psd', action: 'reset' })
+    const autoSlots = await renderPng('out-auto')
+    assert.ok(!autoSlots.slots.some((slot) => slot.name === '角标'), 'auto detection does not pick 角标')
     const cleared = await editTemplate({ cwd, template: 'fixture.psd', action: 'status' })
     assert.equal(cleared.textEdits.length, 0, 'reset drops text edits')
     assert.equal(cleared.elements.length, 0, 'reset drops elements')
 
-    const restored = await editTemplate({
-      cwd,
-      template: 'fixture.psd',
-      action: 'load_project',
-      project: 'project.json',
-    })
+    const restored = await editTemplate({ cwd, template: 'fixture.psd', action: 'load_project', project: 'p/project.json' })
     assert.equal(restored.textEdits, 1, 'project restores the text edit')
-    assert.equal(restored.elements, 1, 'project restores the placed element')
-    const after = await editTemplate({ cwd, template: 'fixture.psd', action: 'status' })
-    assert.ok(after.missingFonts.includes('Noto Sans SC'), 'missing fonts stay visible in status')
-    assert.ok(after.missingFonts.includes('GlowSansSC-Normal-Medium'), 'PostScript families are listed as needed')
+    assert.equal(restored.elements, 2, 'project restores the placed elements')
+    assert.ok(restored.missingFonts.includes('GlowSansSC-Normal-Medium'), 'PostScript families listed as missing')
+    // Regression: a render without `slots` uses the restored slots.
+    const pinned = await renderPng('out-pinned')
+    assert.deepEqual(pinned.slots.map((slot) => slot.name), ['角标'], 'render keeps the project slots')
 
-    // --- psd_edit: font registration (skipped when no system font) -------
-    const fontCandidates = [
+    // --- regression: a failed load leaves the current state untouched ------
+    const broken = JSON.parse(await fs.readFile(path.join(cwd, 'p/project.json'), 'utf8'))
+    broken.textEdits = { 价格: { value: '¥0.01' } }
+    broken.elements.push({ name: 'gone', source: 'missing.png' })
+    await fs.writeFile(path.join(cwd, 'p/broken.json'), JSON.stringify(broken))
+    await assert.rejects(
+      editTemplate({ cwd, template: 'fixture.psd', action: 'load_project', project: 'p/broken.json' }),
+      /gone|missing/,
+    )
+    const intact = await editTemplate({ cwd, template: 'fixture.psd', action: 'status' })
+    assert.equal(intact.elements.length, 2, 'elements survive a failed load')
+    assert.equal(intact.textEdits.length, 1, 'text edits survive a failed load')
+    assert.deepEqual(intact.slots, restored.slots, 'slots survive a failed load')
+    await editTemplate({ cwd, template: 'fixture.psd', action: 'reset' })
+
+    // --- regression: writes never follow a symlink out of the workspace ----
+    const victim = path.join(outside, 'victim.txt')
+    await fs.writeFile(victim, 'keep me')
+    await fs.symlink(victim, path.join(cwd, 'link.json'))
+    await assert.rejects(
+      editTemplate({ cwd, template: 'fixture.psd', action: 'save_project', project: 'link.json' }),
+      /outside the session workspace/,
+    )
+    await fs.symlink(outside, path.join(cwd, 'linkdir'))
+    await assert.rejects(
+      editTemplate({ cwd, template: 'fixture.psd', action: 'save_project', project: 'linkdir/new/p.json' }),
+      /outside the session workspace/,
+    )
+    await assert.rejects(renderPng('linkdir/out'), /outside the session workspace/)
+    await fs.symlink(path.join(outside, 'dangling.json'), path.join(cwd, 'dangling.json'))
+    await assert.rejects(
+      editTemplate({ cwd, template: 'fixture.psd', action: 'save_project', project: 'dangling.json' }),
+      /outside the session workspace/,
+    )
+    assert.equal(await fs.readFile(victim, 'utf8'), 'keep me', 'file outside the workspace untouched')
+    assert.deepEqual(await fs.readdir(outside), ['victim.txt'], 'nothing written outside the workspace')
+
+    // --- font registration: file stem plus PostScript name -----------------
+    let fontSource = null
+    for (const candidate of [
       '/System/Library/Fonts/Supplemental/Arial.ttf',
       '/Library/Fonts/Arial.ttf',
       '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
-    ]
-    let fontSource = null
-    for (const candidate of fontCandidates) {
+    ]) {
       try {
         await fs.access(candidate)
         fontSource = candidate
         break
-      } catch { /* try the next one */ }
+      } catch {
+        /* try the next one */
+      }
     }
     if (fontSource) {
       await fs.copyFile(fontSource, path.join(cwd, 'StudioSmoke.ttf'))
-      const fonts = await editTemplate({
-        cwd,
-        template: 'fixture.psd',
-        action: 'fonts',
-        paths: ['StudioSmoke.ttf'],
-      })
-      assert.ok(fonts.loaded.includes('StudioSmoke'), 'font file registered under its stem')
-      assert.ok(fonts.registered.includes('StudioSmoke'), 'registered list reports the family')
-      assert.deepEqual(fonts.failed, [], 'no font failed to register')
+      const fonts = await editTemplate({ cwd, template: 'fixture.psd', action: 'fonts', fonts: ['StudioSmoke.ttf'] })
+      assert.ok(fonts.loaded.includes('StudioSmoke'), 'font registered under its file stem')
+      const postScript = readFontPostScriptName(await fs.readFile(fontSource))
+      assert.ok(postScript && fonts.loaded.includes(postScript), `font registered under ${postScript}`)
+      assert.deepEqual(fonts.skipped, [], 'no font skipped')
     }
 
     console.log('smoke test passed')
   } finally {
     await fs.rm(workspace, { recursive: true, force: true })
+    await fs.rm(outside, { recursive: true, force: true })
   }
 }
 
