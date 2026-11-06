@@ -167,7 +167,7 @@ npm test
 | --- | --- |
 | `psd_inspect` | Template size, layer tree (name, depth, visibility, bounds, leaf id), and auto-detected slots. Text layers also report their copy, alignment, and per-run styles (family, weight, size, color). |
 | `psd_batch_render` | Render many SKUs into one template and write JPG/PNG files (optionally a ZIP) inside the workspace. Supports `text` / `textBySku` text rewriting and `fontDir` font registration; the `suppressed` result lists slot siblings hidden together with the slot. |
-| `psd_edit` | Edit the template before rendering: `text` (same fields as one `psd_batch_render` `text` item), `element` / `remelement` (add or remove image layers), `fonts` (register font files), `save_project` / `load_project` (project round-trip, slots included), `status`, `reset`. Edits land on the cached document, so the next `psd_batch_render` uses them; its own `text` / `textBySku` win per layer, and after `load_project` a render without `slots` keeps the project's slots. |
+| `psd_edit` | Edit the template before rendering: `text` (same fields as one `psd_batch_render` `text` item), `element` / `remelement` (add or remove image layers), `fonts` (register font files), `save_project` / `load_project` (project round-trip, slots included), `status`, `reset`. Edits land on the cached document, so the next `psd_batch_render` uses them; its own `text` / `textBySku` win per layer, and after `load_project` a render without `slots` keeps the project's slots. Edits outlive the template parse cache, so viewing other templates keeps them; they are dropped only when the PSD changes on disk (`status.editsDropped` says so). A layer named by name, entry id or leaf id merges as the same layer. |
 
 Example request:
 
@@ -187,8 +187,9 @@ Example request:
 ```
 
 All three tools resolve paths relative to the session working directory and
-refuse paths outside it; write targets are checked by their real path, so a
-symlink cannot lead out of the workspace. `psd_batch_render` defaults to JPG at quality 92 and returns
+refuse paths outside it; every write target (output folder, each exported file
+and the ZIP) is checked by its real path, so a symlink cannot lead out of the
+workspace. `psd_batch_render` defaults to JPG at quality 92 and returns
 the output folder plus the first 50 file names.
 
 Visible siblings inside a slot's group that overlap the slot by at least 25% are

@@ -716,6 +716,63 @@ async function main() {
     assert.deepEqual(intact.slots, restored.slots, 'slots survive a failed load')
     await editTemplate({ cwd, template: 'fixture.psd', action: 'reset' })
 
+    // --- regression: one layer named two ways still honours priority -------
+    // psd_edit stores the entry id; text names the layer; textBySku reuses
+    // the entry id, which used to slot it in BEFORE the by-name batch text.
+    const { entryId: priceEntry } = await editTemplate({
+      cwd,
+      template: 'fixture.psd',
+      action: 'text',
+      layer: '价格',
+      value: '¥7.70',
+    })
+    const priceLeaf = inspect.layers.find((layer) => layer.name === '价格').leafId
+    const priority = await renderPng('out-priority', {
+      text: [{ layer: '价格', color: '#ff0000' }],
+      textBySku: { 'sku.png': [{ layer: priceEntry, color: '#00ff00' }] },
+    })
+    const priorityData = (await pngOf('out-priority', priority.files[0])).getImageData(0, 640, 420, 160).data
+    let greenPx = 0
+    let redPx = 0
+    for (let index = 0; index < priorityData.length; index += 4) {
+      const [r, g, b] = [priorityData[index], priorityData[index + 1], priorityData[index + 2]]
+      if (g > 200 && r < 60 && b < 60) greenPx += 1
+      if (r > 200 && g < 60 && b < 60) redPx += 1
+    }
+    assert.ok(greenPx > 100 && redPx < greenPx / 10, `textBySku by entry id beats text by name (${greenPx} green, ${redPx} red)`)
+    // Leaf ids resolve to the same layer too.
+    const byLeaf = await renderPng('out-priority-leaf', {
+      text: [{ layer: priceEntry, color: '#ff0000' }],
+      textBySku: { 'sku.png': [{ layer: priceLeaf, color: '#00ff00' }] },
+    })
+    assert.equal(byLeaf.textVariants, 1)
+
+    // --- regression: viewing other templates keeps unsaved edits -----------
+    await inspectTemplate({ cwd, template: 'zorder.psd' })
+    await inspectTemplate({ cwd, template: 'shadow-steal.psd' })
+    const afterEviction = await editTemplate({ cwd, template: 'fixture.psd', action: 'status' })
+    assert.equal(afterEviction.textEdits.length, 1, 'text edit survives the template cache eviction')
+    // Changing the PSD itself drops the edits, and status says why.
+    const later = new Date(Date.now() + 5000)
+    await fs.utimes(path.join(cwd, 'fixture.psd'), later, later)
+    const afterChange = await editTemplate({ cwd, template: 'fixture.psd', action: 'status' })
+    assert.equal(afterChange.textEdits.length, 0, 'edits dropped once the PSD changes on disk')
+    assert.match(afterChange.editsDropped || '', /changed on disk/)
+    await editTemplate({ cwd, template: 'fixture.psd', action: 'reset' })
+
+    // --- regression: an output file symlink cannot redirect a render -------
+    const trapTarget = path.join(outside, 'trap.png')
+    await fs.writeFile(trapTarget, 'keep me')
+    await fs.mkdir(path.join(cwd, 'out-trap'))
+    await fs.symlink(trapTarget, path.join(cwd, 'out-trap', 'sku.png'))
+    await assert.rejects(renderPng('out-trap'), /outside the session workspace/)
+    await fs.mkdir(path.join(cwd, 'out-trap-zip'))
+    await fs.symlink(path.join(outside, 'trap.zip'), path.join(cwd, 'out-trap-zip', 'fixture-1.zip'))
+    await assert.rejects(renderPng('out-trap-zip', { zip: true }), /outside the session workspace/)
+    assert.deepEqual(await fs.readdir(path.join(cwd, 'out-trap-zip')), ['fixture-1.zip'], 'nothing rendered before the check')
+    assert.equal(await fs.readFile(trapTarget, 'utf8'), 'keep me', 'output symlink target untouched')
+    await fs.rm(trapTarget)
+
     // --- regression: writes never follow a symlink out of the workspace ----
     const victim = path.join(outside, 'victim.txt')
     await fs.writeFile(victim, 'keep me')

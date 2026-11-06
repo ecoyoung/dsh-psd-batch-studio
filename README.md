@@ -113,7 +113,7 @@ plugin_manager install_bundle, target = /绝对路径/dsh-psd-batch-studio
 | --- | --- |
 | `psd_inspect` | 返回模板尺寸、图层树（名称/层级/可见性/边界/图层 id）、自动识别的商品槽位；文字层额外返回文案、对齐和逐段字体样式（字体/字重/字号/颜色）。 |
 | `psd_batch_render` | 把一批 SKU 套进模板，输出 JPG/PNG（可选 ZIP）到工作区；支持 `text` / `textBySku` 重写文字层、`fontDir` 注册字体；结果里的 `suppressed` 列出随槽位一起隐藏的同组重叠图层。 |
-| `psd_edit` | 渲染前改模板：`text`（参数与 `psd_batch_render` 的一条 `text` 相同）、`element` / `remelement`（加减图片层）、`fonts`（注册字体文件）、`save_project` / `load_project`（工程存档，含商品位）、`status`、`reset`。改动落在缓存的文档上，随后的 `psd_batch_render` 直接生效，同层以渲染时传入的 `text` / `textBySku` 为准；载入工程后不传 `slots` 的渲染沿用工程里的商品位。 |
+| `psd_edit` | 渲染前改模板：`text`（参数与 `psd_batch_render` 的一条 `text` 相同）、`element` / `remelement`（加减图片层）、`fonts`（注册字体文件）、`save_project` / `load_project`（工程存档，含商品位）、`status`、`reset`。改动落在缓存的文档上，随后的 `psd_batch_render` 直接生效，同层以渲染时传入的 `text` / `textBySku` 为准；载入工程后不传 `slots` 的渲染沿用工程里的商品位。编辑状态不随模板解析缓存淘汰，查看其他模板不会丢；PSD 文件本身改动后会清空，`status.editsDropped` 说明原因。同一图层用名称、entry id 或 leaf id 指定都按同一层合并。 |
 
 调用示例：
 
@@ -132,7 +132,7 @@ plugin_manager install_bundle, target = /绝对路径/dsh-psd-batch-studio
 }
 ```
 
-三个工具的路径都相对当前会话工作目录解析，并拒绝越界路径（写入路径按真实路径校验，符号链接不能指到工作区外）。`psd_batch_render` 默认 JPG、质量 92，
+三个工具的路径都相对当前会话工作目录解析，并拒绝越界路径（写入路径按真实路径校验，包括输出目录、每个导出文件和 ZIP，符号链接不能指到工作区外）。`psd_batch_render` 默认 JPG、质量 92，
 返回输出目录和前 50 个文件名。
 
 槽位所在的组里，其它「可见且与槽位重叠 ≥25%」的图层会随槽位一起隐藏（旧商品图、没对齐的

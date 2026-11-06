@@ -17604,10 +17604,45 @@ async function resolveInWorkspace(cwd, candidate, { mustExist = true } = {}) {
   }
   return absolute;
 }
+var editStates = /* @__PURE__ */ new Map();
+function editStateFor(absolutePath, stat) {
+  let state = editStates.get(absolutePath);
+  if (state && (state.mtimeMs !== stat.mtimeMs || state.size !== stat.size)) {
+    const hadEdits = state.textEdits.size > 0 || state.elements.length > 0 || !!state.pinnedSlots;
+    state = { ...freshEditState(stat), dropped: hadEdits ? "template changed on disk since the edits were made" : void 0 };
+    editStates.set(absolutePath, state);
+  }
+  if (!state) {
+    state = freshEditState(stat);
+    editStates.set(absolutePath, state);
+  }
+  return state;
+}
+function freshEditState(stat) {
+  return { mtimeMs: stat.mtimeMs, size: stat.size, textEdits: /* @__PURE__ */ new Map(), elements: [], pinnedSlots: null };
+}
+function attachEditState(doc, absolutePath) {
+  if (doc.__editPath === absolutePath) return;
+  Object.defineProperty(doc, "__editPath", { value: absolutePath, enumerable: false });
+  for (const key of ["textEdits", "elements", "pinnedSlots"]) {
+    Object.defineProperty(doc, key, {
+      enumerable: true,
+      configurable: true,
+      get: () => editStates.get(absolutePath)[key],
+      set: (value) => {
+        editStates.get(absolutePath)[key] = value;
+      }
+    });
+  }
+}
 async function loadTemplateDoc(absolutePath) {
   const stat = await fs.stat(absolutePath);
+  editStateFor(absolutePath, stat);
   const cached = templateCache.get(absolutePath);
-  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.doc;
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    attachEditState(cached.doc, absolutePath);
+    return cached.doc;
+  }
   const buffer = await fs.readFile(absolutePath);
   const doc = await parseTemplate({
     name: path.basename(absolutePath),
@@ -17616,7 +17651,16 @@ async function loadTemplateDoc(absolutePath) {
   });
   if (templateCache.size >= 2) templateCache.delete(templateCache.keys().next().value);
   templateCache.set(absolutePath, { mtimeMs: stat.mtimeMs, size: stat.size, doc });
+  attachEditState(doc, absolutePath);
   return doc;
+}
+function canonicalOverrides(doc, list) {
+  if (!Array.isArray(list) || list.length === 0) return list;
+  return list.map((override) => {
+    const target = String(override.layer ?? "");
+    const entry = doc.entries.find((item) => item.id === target || item.leafId === target) || doc.entries.find((item) => item.name === target && item.text) || doc.entries.find((item) => item.name === target);
+    return entry ? { ...override, layer: entry.id } : override;
+  });
 }
 function resolveSlots(doc, specs) {
   const ids = [];
@@ -17764,15 +17808,16 @@ async function renderBatch({
     fontsSkipped = registration.skipped;
   }
   const textWarnings = [];
-  const savedEdits = doc.textEdits && doc.textEdits.size ? [...doc.textEdits.values()] : null;
+  const savedEdits = doc.textEdits && doc.textEdits.size ? canonicalOverrides(doc, [...doc.textEdits.values()]) : null;
+  const batchText = canonicalOverrides(doc, text);
   const groups = /* @__PURE__ */ new Map();
   const used = /* @__PURE__ */ new Set();
   const extensionFor = format === "png" ? "png" : "jpg";
   const jobs = skuFiles.map((file, index) => {
     const base = path.basename(file, path.extname(file));
     const overrides = mergeOverrideLists(
-      mergeOverrideLists(savedEdits, text),
-      textBySku ? textBySku[path.basename(file)] ?? textBySku[base] : void 0
+      mergeOverrideLists(savedEdits, batchText),
+      canonicalOverrides(doc, textBySku ? textBySku[path.basename(file)] ?? textBySku[base] : void 0)
     );
     const signature = overrides ? JSON.stringify(overrides) : "";
     let group = groups.get(signature);
@@ -17797,6 +17842,10 @@ async function renderBatch({
     fill: Number.isFinite(Number(fill)) ? Number(fill) : DEFAULT_SETTINGS.fill
   };
   const zipBuffers = zip ? new Array(jobs.length) : null;
+  const zipPath = zip ? path.join(absoluteOut, `${sanitizeName(doc.name)}-${jobs.length}.zip`) : null;
+  for (const target of [...jobs.map((job) => path.join(absoluteOut, job.name)), ...zipPath ? [zipPath] : []]) {
+    await resolveInWorkspace(cwd, path.relative(cwd, target), { mustExist: false });
+  }
   for (const group of groups.values()) {
     let scene = doc.scene;
     if (group.overrides) {
@@ -17829,12 +17878,7 @@ async function renderBatch({
   if (zipBuffers) jobs.forEach((job) => {
     zipEntries[job.name] = zipBuffers[job.index];
   });
-  let zipPath;
-  if (zip) {
-    const data = zipSync(zipEntries, { level: 0 });
-    zipPath = path.join(absoluteOut, `${sanitizeName(doc.name)}-${files.length}.zip`);
-    await fs.writeFile(zipPath, data);
-  }
+  if (zipPath) await fs.writeFile(zipPath, zipSync(zipEntries, { level: 0 }));
   return {
     count: files.length,
     outDir: path.relative(cwd, absoluteOut) || ".",
@@ -17977,6 +18021,7 @@ async function editTemplate(options) {
       template: path.relative(cwd, absolute) || template,
       slots: currentSlots(doc),
       slotsPinned: !!(doc.pinnedSlots && doc.pinnedSlots.size),
+      ...editStates.get(absolute)?.dropped ? { editsDropped: editStates.get(absolute).dropped } : {},
       textEdits: [...doc.textEdits.keys()],
       elements: doc.elements.map((element) => element.name),
       fonts: [...registeredFamilies].sort(),
@@ -18095,6 +18140,7 @@ async function editTemplate(options) {
     doc.textEdits = next.textEdits;
     doc.elements = next.elements;
     doc.pinnedSlots = next.slots.length ? new Set(next.slots) : null;
+    editStates.get(absolute).dropped = void 0;
     if (next.slots.length) doc.slots = new Set(next.slots);
     return {
       project: path.relative(cwd, projectPath),
@@ -18108,6 +18154,7 @@ async function editTemplate(options) {
     doc.textEdits = /* @__PURE__ */ new Map();
     doc.elements = [];
     doc.pinnedSlots = null;
+    editStates.get(absolute).dropped = void 0;
     return { ok: true, textEdits: 0, elements: 0 };
   }
   throw new Error(
