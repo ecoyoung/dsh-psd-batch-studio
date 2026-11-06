@@ -53,6 +53,31 @@ export function fontWeightOf(name, fauxBold) {
   return fauxBold ? 700 : 400
 }
 
+// ag-psd decodes text fill colors as {r,g,b}, grayscale {k} or CMYK {c,m,y,k},
+// all scaled 0-255 depending on the document's color mode.
+function fillColorOf(fill) {
+  if (!fill) return [0, 0, 0]
+  if (fill.r != null) {
+    return [Math.round(fill.r ?? 0), Math.round(fill.g ?? 0), Math.round(fill.b ?? 0)]
+  }
+  if (fill.k != null && fill.c == null) {
+    const value = Math.round(fill.k)
+    return [value, value, value]
+  }
+  if (fill.c != null) {
+    const c = (fill.c ?? 0) / 255
+    const m = (fill.m ?? 0) / 255
+    const y = (fill.y ?? 0) / 255
+    const k = (fill.k ?? 0) / 255
+    return [
+      Math.round(255 * (1 - c) * (1 - k)),
+      Math.round(255 * (1 - m) * (1 - k)),
+      Math.round(255 * (1 - y) * (1 - k)),
+    ]
+  }
+  return [0, 0, 0]
+}
+
 export function parseColor(input) {
   if (Array.isArray(input)) return [input[0] | 0, input[1] | 0, input[2] | 0]
   const hex = String(input || '').replace(/^#/, '')
@@ -67,29 +92,25 @@ function cssColor(color) {
 
 function describeTextStyle(raw) {
   const style = raw || {}
-  const color = style.fillColor || {}
   return {
     family: fontFamilyOf(style.font ? style.font.name : ''),
     weight: fontWeightOf(style.font ? style.font.name : '', style.fauxBold),
     size: Math.round((style.fontSize || 0) * 100) / 100,
-    color: [
-      Math.round(color.r ?? 0),
-      Math.round(color.g ?? 0),
-      Math.round(color.b ?? 0),
-    ],
+    color: fillColorOf(style.fillColor),
     tracking: style.tracking || 0,
   }
 }
 
 // styleRuns only carry the fields that differ from the base style, so each run
-// must be merged over it.
-function mergeTextStyle(base, raw) {
+// must be merged over it. Flags absent from the run (like fauxBold) inherit
+// from the PSD base style, so a font-only override keeps its weight.
+function mergeTextStyle(base, raw, baseStyle) {
   const style = (raw && raw.style) || {}
   const has = (key) => style[key] !== undefined && style[key] !== null
   const merged = { ...base }
   if (has('font') && style.font && style.font.name) {
     merged.family = fontFamilyOf(style.font.name)
-    merged.weight = fontWeightOf(style.font.name, style.fauxBold)
+    merged.weight = fontWeightOf(style.font.name, has('fauxBold') ? style.fauxBold : baseStyle?.fauxBold)
   } else if (has('fauxBold')) {
     merged.weight = fontWeightOf(merged.family, style.fauxBold)
   }
@@ -121,7 +142,7 @@ export function describeTextLayer(text) {
   for (const run of text.styleRuns || []) {
     const length = Math.max(0, Math.round(run.length || 0))
     if (!length) continue
-    runs.push({ len: length, ...mergeTextStyle(base, run) })
+    runs.push({ len: length, ...mergeTextStyle(base, run, style) })
   }
   let total = runs.reduce((sum, run) => sum + run.len, 0)
   if (total !== value.length && runs.length) {

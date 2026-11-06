@@ -16421,6 +16421,28 @@ function fontWeightOf(name, fauxBold) {
   if (/light|thin/.test(raw)) return 300;
   return fauxBold ? 700 : 400;
 }
+function fillColorOf(fill) {
+  if (!fill) return [0, 0, 0];
+  if (fill.r != null) {
+    return [Math.round(fill.r ?? 0), Math.round(fill.g ?? 0), Math.round(fill.b ?? 0)];
+  }
+  if (fill.k != null && fill.c == null) {
+    const value = Math.round(fill.k);
+    return [value, value, value];
+  }
+  if (fill.c != null) {
+    const c = (fill.c ?? 0) / 255;
+    const m = (fill.m ?? 0) / 255;
+    const y = (fill.y ?? 0) / 255;
+    const k = (fill.k ?? 0) / 255;
+    return [
+      Math.round(255 * (1 - c) * (1 - k)),
+      Math.round(255 * (1 - m) * (1 - k)),
+      Math.round(255 * (1 - y) * (1 - k))
+    ];
+  }
+  return [0, 0, 0];
+}
 function parseColor(input) {
   if (Array.isArray(input)) return [input[0] | 0, input[1] | 0, input[2] | 0];
   const hex = String(input || "").replace(/^#/, "");
@@ -16433,26 +16455,21 @@ function cssColor(color) {
 }
 function describeTextStyle(raw) {
   const style = raw || {};
-  const color = style.fillColor || {};
   return {
     family: fontFamilyOf(style.font ? style.font.name : ""),
     weight: fontWeightOf(style.font ? style.font.name : "", style.fauxBold),
     size: Math.round((style.fontSize || 0) * 100) / 100,
-    color: [
-      Math.round(color.r ?? 0),
-      Math.round(color.g ?? 0),
-      Math.round(color.b ?? 0)
-    ],
+    color: fillColorOf(style.fillColor),
     tracking: style.tracking || 0
   };
 }
-function mergeTextStyle(base, raw) {
+function mergeTextStyle(base, raw, baseStyle) {
   const style = raw && raw.style || {};
   const has = (key) => style[key] !== void 0 && style[key] !== null;
   const merged = { ...base };
   if (has("font") && style.font && style.font.name) {
     merged.family = fontFamilyOf(style.font.name);
-    merged.weight = fontWeightOf(style.font.name, style.fauxBold);
+    merged.weight = fontWeightOf(style.font.name, has("fauxBold") ? style.fauxBold : baseStyle?.fauxBold);
   } else if (has("fauxBold")) {
     merged.weight = fontWeightOf(merged.family, style.fauxBold);
   }
@@ -16477,7 +16494,7 @@ function describeTextLayer(text) {
   for (const run of text.styleRuns || []) {
     const length = Math.max(0, Math.round(run.length || 0));
     if (!length) continue;
-    runs.push({ len: length, ...mergeTextStyle(base, run) });
+    runs.push({ len: length, ...mergeTextStyle(base, run, style) });
   }
   let total = runs.reduce((sum, run) => sum + run.len, 0);
   if (total !== value.length && runs.length) {
@@ -16933,12 +16950,6 @@ function suggestSlots(doc) {
   }
   scored.sort((a, b) => b.score - a.score);
   if (scored.length === 0) return [];
-  const overlaps = (a, b) => {
-    const width = Math.min(a.left + a.width, b.left + b.width) - Math.max(a.left, b.left);
-    const height = Math.min(a.top + a.height, b.top + b.height) - Math.max(a.top, b.top);
-    if (width <= 0 || height <= 0) return 0;
-    return width * height / Math.min(a.width * a.height, b.width * b.height);
-  };
   const best = scored[0];
   const picked = [best.leaf];
   for (const candidate of scored.slice(1)) {
@@ -16946,7 +16957,7 @@ function suggestSlots(doc) {
     const leaf = candidate.leaf;
     const sameSize = Math.abs(leaf.width - best.leaf.width) <= best.leaf.width * 0.35 && Math.abs(leaf.height - best.leaf.height) <= best.leaf.height * 0.35;
     const sameRow = Math.abs(leaf.top - best.leaf.top) <= docH * 0.06;
-    const crowded = picked.some((other) => overlaps(other, leaf) > 0.6);
+    const crowded = picked.some((other) => boundsOverlapRatio(leafBounds(other), leafBounds(leaf)) > 0.6);
     if (sameSize && sameRow && !crowded) picked.push(leaf);
   }
   return picked.map((leaf) => leaf.id);
@@ -17175,37 +17186,23 @@ function buildScene(doc) {
   const visibleLeaves = doc.leaves.filter((leaf) => isLeafVisible(doc, leaf));
   const entryById = new Map(doc.entries.map((entry) => [entry.id, entry]));
   const clusters = [];
+  const clusterOf = /* @__PURE__ */ new Map();
   const claimed = /* @__PURE__ */ new Set();
   const suppressed = [];
   for (const leaf of visibleLeaves) {
     if (!doc.slots.has(leaf.id) || claimed.has(leaf.id)) continue;
-    const members = [leaf];
     claimed.add(leaf.id);
-    const slotBounds = leafBounds(leaf);
-    let rect = slotBounds;
+    let rect = leafBounds(leaf);
     for (const other of visibleLeaves) {
       if (claimed.has(other.id) || doc.slots.has(other.id)) continue;
       if (!isStackedCopy(leaf, other, doc)) continue;
-      members.push(other);
       claimed.add(other.id);
       rect = unionBounds(rect, leafBounds(other));
     }
-    const parent = entryById.get(leaf.entryId)?.parentId;
-    if (parent) {
-      for (const other of visibleLeaves) {
-        if (claimed.has(other.id) || doc.slots.has(other.id)) continue;
-        if (!other.path.includes(parent)) continue;
-        if (boundsOverlapRatio(slotBounds, leafBounds(other)) < SLOT_SIBLING_OVERLAP) continue;
-        members.push(other);
-        claimed.add(other.id);
-        suppressed.push({ leafId: other.id, name: other.name });
-      }
-    }
-    clusters.push({
+    const cluster = {
       id: leaf.id,
       name: leaf.name,
-      names: members.map((member) => member.name),
-      members: new Set(members.map((member) => member.id)),
+      members: /* @__PURE__ */ new Set([leaf.id]),
       rect: {
         x: rect.left,
         y: rect.top,
@@ -17213,11 +17210,26 @@ function buildScene(doc) {
         h: rect.bottom - rect.top
       },
       emitted: false
-    });
+    };
+    clusters.push(cluster);
+    clusterOf.set(leaf.id, cluster);
+    for (const other of visibleLeaves) {
+      if (cluster.members.has(other.id)) clusterOf.set(other.id, cluster);
+    }
   }
-  const clusterOf = /* @__PURE__ */ new Map();
   for (const cluster of clusters) {
-    for (const memberId of cluster.members) clusterOf.set(memberId, cluster);
+    const leaf = visibleLeaves.find((item) => item.id === cluster.id);
+    const parent = entryById.get(leaf.entryId)?.parentId;
+    if (!parent) continue;
+    for (const other of visibleLeaves) {
+      if (claimed.has(other.id) || doc.slots.has(other.id)) continue;
+      if (!other.path.includes(parent)) continue;
+      if (boundsOverlapRatio(leafBounds(leaf), leafBounds(other)) < SLOT_SIBLING_OVERLAP) continue;
+      cluster.members.add(other.id);
+      claimed.add(other.id);
+      clusterOf.set(other.id, cluster);
+      suppressed.push({ leafId: other.id, name: other.name });
+    }
   }
   const parts = [];
   let run = [];
@@ -17228,14 +17240,14 @@ function buildScene(doc) {
   };
   for (const leaf of visibleLeaves) {
     const cluster = clusterOf.get(leaf.id);
-    if (cluster) {
-      if (cluster.emitted) continue;
-      cluster.emitted = true;
-      flush();
-      parts.push({ kind: "slot", leafId: cluster.id, name: cluster.name, rect: cluster.rect });
+    if (!cluster) {
+      run.push(leaf);
       continue;
     }
-    run.push(leaf);
+    if (leaf.id !== cluster.id || cluster.emitted) continue;
+    cluster.emitted = true;
+    flush();
+    parts.push({ kind: "slot", leafId: cluster.id, name: cluster.name, rect: cluster.rect });
   }
   flush();
   if (parts.length === 0) {
@@ -17535,7 +17547,10 @@ async function inspectTemplate({ cwd, template }) {
       layer.textContent = entry.text.value;
       layer.textAlign = entry.text.align;
       layer.runCount = entry.text.runs.length;
-      if (entry.text.runs.length) layer.runs = entry.text.runs.slice(0, 8);
+      if (entry.text.runs.length) {
+        layer.runs = entry.text.runs.slice(0, 8);
+        layer.runsTruncated = entry.text.runs.length > 8;
+      }
     }
     if (entry.bounds) layer.bounds = entry.bounds;
     return layer;
@@ -17661,6 +17676,8 @@ async function renderBatch({
       bounds: [slot.rect.x, slot.rect.y, slot.rect.x + slot.rect.w, slot.rect.y + slot.rect.h]
     })),
     suppressed: doc.scene.suppressed.slice(0, 50),
+    suppressedCount: doc.scene.suppressed.length,
+    suppressedTruncated: doc.scene.suppressed.length > 50,
     textVariants: variantCache.size,
     ...fontsRegistered ? { fontsRegistered } : {},
     ...fontsSkipped && fontsSkipped.length ? { fontsSkipped } : {},
@@ -17727,7 +17744,8 @@ function registerTools(ctx) {
                       }
                     }
                   },
-                  runCount: { type: "integer" }
+                  runCount: { type: "integer" },
+                  runsTruncated: { type: "boolean" }
                 }
               }
             },
@@ -17893,7 +17911,7 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
         schema: {
           type: "object",
           additionalProperties: false,
-          required: ["count", "outDir", "files", "slots", "suppressed", "textVariants"],
+          required: ["count", "outDir", "files", "slots", "suppressed", "suppressedCount", "suppressedTruncated", "textVariants"],
           properties: {
             count: { type: "integer" },
             outDir: { type: "string" },
@@ -17925,6 +17943,8 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
                 }
               }
             },
+            suppressedCount: { type: "integer" },
+            suppressedTruncated: { type: "boolean" },
             textVariants: { type: "integer" },
             textWarnings: { type: "array", items: { type: "string" } },
             fontsRegistered: { type: "array", items: { type: "string" } },
@@ -17935,7 +17955,7 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
           {
             type: "text",
             text: `Rendered ${value.count} image(s) into ${value.outDir} using ${value.slots.map((slot) => slot.name).join(", ")}${value.suppressed && value.suppressed.length ? `
-Suppressed overlapping slot siblings (hidden with the slot): ${value.suppressed.map((layer) => layer.name).join(", ")}` : ""}${value.textVariants ? `
+Suppressed overlapping slot siblings (hidden with the slot): ${value.suppressed.map((layer) => layer.name).join(", ")}${value.suppressedTruncated ? ` (+${value.suppressedCount - value.suppressed.length} more)` : ""}` : ""}${value.textVariants ? `
 Text rewritten in ${value.textVariants} variant(s).` : ""}${value.fontsRegistered && value.fontsRegistered.length ? `
 Fonts registered: ${value.fontsRegistered.join(", ")}` : ""}${value.textWarnings && value.textWarnings.length ? `
 Text warnings: ${value.textWarnings.slice(0, 8).join("\uFF1B")}` : ""}${value.zip ? `
