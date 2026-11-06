@@ -15,6 +15,7 @@ import { writePsd } from 'ag-psd'
 
 import { parseTemplate, buildScene, suggestSlots } from '../src/core/psd.js'
 import { inspectTemplate, renderBatch } from '../src/server.js'
+import { mergeOverrideLists } from '../src/core/text.js'
 
 // Importing src/server.js installs the ag-psd/@napi-rs canvas factory.
 
@@ -148,6 +149,122 @@ async function main() {
     assert.ok(badge[0] > 240, '角标 still rendered after suppression')
     const ground = outputCtx.getImageData(700, 700, 1, 1).data
     assert.ok(Math.abs(ground[0] - 204) < 10, '背景 still rendered after suppression')
+
+    // --- text overrides: global rewrite with live glyphs -------------------
+    const baseline = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png'],
+      outDir: 'out-base',
+      format: 'png',
+    })
+    const overridden = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png'],
+      outDir: 'out',
+      format: 'png',
+      text: [
+        {
+          layer: '价格',
+          value: '¥88.80',
+          runs: [{ len: 3, color: '#0033cc' }, { len: 1, family: 'NoSuchFont' }, { len: 2 }],
+        },
+      ],
+    })
+    assert.equal(overridden.count, 1)
+    assert.equal(overridden.textVariants, 1)
+    assert.ok(
+      overridden.textWarnings.some((warning) => warning.includes('NoSuchFont')),
+      'unresolvable fonts are reported as fallback warnings',
+    )
+
+    // PNG keeps pixels exact: the price region must change when the copy is
+    // rewritten with live glyphs.
+    const beforeCanvas = createCanvas(800, 800)
+    const beforeCtx = beforeCanvas.getContext('2d')
+    beforeCtx.drawImage(await loadImageFrom(path.join(cwd, 'out-base', baseline.files[0])), 0, 0)
+    outputCtx.drawImage(await loadImageFrom(path.join(cwd, 'out', overridden.files[0])), 0, 0)
+    let changed = 0
+    for (let y = 690; y < 775; y += 3) {
+      for (let x = 95; x < 305; x += 3) {
+        const a = beforeCtx.getImageData(x, y, 1, 1).data
+        const b = outputCtx.getImageData(x, y, 1, 1).data
+        if (Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]) > 24) changed += 1
+      }
+    }
+    assert.ok(changed > 50, `price region repainted by the override (${changed} sampled pixels)`)
+
+    // The decoration and background must survive the text machinery.
+    const badgeAfterText = outputCtx.getImageData(70, 60, 1, 1).data
+    assert.ok(badgeAfterText[0] > 240, '角标 still rendered after text override')
+
+    // --- per-SKU overrides: two SKUs, two prices, two scenes ---------------
+    await fs.rm(path.join(cwd, 'out'), { recursive: true, force: true })
+    const skuB = fillCanvas(300, 400, '#20b020', 25, 25, 250, 350)
+    await fs.writeFile(path.join(cwd, 'sku-b.png'), await skuB.encode('png'))
+    const perSku = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png', 'sku-b.png'],
+      outDir: 'out',
+      format: 'png',
+      textBySku: {
+        'sku.png': [{ layer: '价格', value: '¥11.00' }],
+        'sku-b.png': [{ layer: '价格', value: '¥22.00' }],
+      },
+    })
+    assert.equal(perSku.count, 2)
+    assert.equal(perSku.textVariants, 2, 'one scene per distinct price')
+    const [first, second] = await Promise.all(
+      perSku.files.slice(0, 2).map((name) => fs.readFile(path.join(cwd, 'out', name))),
+    )
+    assert.ok(first.equals(second) === false, 'per-SKU text produces different images')
+
+    // --- fontDir: registering real fonts removes the fallback warning ------
+    const fontDir = path.join(cwd, 'fonts')
+    await fs.mkdir(fontDir, { recursive: true })
+    let fontFile = null
+    for (const candidate of [
+      '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
+      '/System/Library/Fonts/Supplemental/Arial.ttf',
+    ]) {
+      try {
+        await fs.copyFile(candidate, path.join(fontDir, 'TestFont_Bold.ttf'))
+        fontFile = candidate
+        break
+      } catch {
+        /* candidate not present on this machine */
+      }
+    }
+    if (fontFile) {
+      const withFonts = await renderBatch({
+        cwd,
+        template: 'fixture.psd',
+        skus: ['sku.png'],
+        outDir: 'out',
+        format: 'png',
+        fontDir: 'fonts',
+        text: [{ layer: '价格', value: '¥66.00', font: 'TestFont Bold' }],
+      })
+      assert.ok(
+        withFonts.fontsRegistered && withFonts.fontsRegistered.includes('TestFont Bold'),
+        'registered family names reported',
+      )
+      assert.ok(
+        !(withFonts.textWarnings || []).some((warning) => warning.includes('TestFont Bold')),
+        'registered font resolves without fallback warning',
+      )
+    }
+
+    // --- override list merge: per-SKU wins per layer ------------------------
+    const merged = mergeOverrideLists([{ layer: 'a', value: '1' }, { layer: 'b', value: '2' }], [
+      { layer: 'b', value: '3' },
+    ])
+    assert.deepEqual(
+      merged.map((override) => `${override.layer}=${override.value}`),
+      ['a=1', 'b=3'],
+    )
 
     console.log('smoke test passed')
   } finally {

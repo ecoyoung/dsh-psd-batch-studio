@@ -7,11 +7,12 @@
  */
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { createCanvas, loadImage } from '@napi-rs/canvas'
+import { createCanvas, loadImage, GlobalFonts } from '@napi-rs/canvas'
 import { initializeCanvas } from 'ag-psd'
 import { zipSync } from 'fflate'
 import { setCanvasFactory } from './core/canvas.js'
 import { parseTemplate, buildScene, suggestSlots, isEntryVisible, isLeafVisible } from './core/psd.js'
+import { applyTextOverrides, cloneDoc, mergeOverrideLists, fontFamilyOf } from './core/text.js'
 import { drawScene, measureContent, DEFAULT_SETTINGS, DEFAULT_ADJUST } from './core/fit.js'
 import { sanitizeName, uniqueName } from './core/export.js'
 
@@ -19,8 +20,51 @@ setCanvasFactory((width, height) => createCanvas(width, height))
 initializeCanvas((width, height) => createCanvas(width, height))
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp'])
+const FONT_EXTENSIONS = new Set(['.ttf', '.otf', '.ttc'])
 
 const templateCache = new Map()
+
+/**
+ * Register every .ttf/.otf/.ttc file in `dir` under its file stem (and its
+ * mapped family alias, e.g. "SourceHanSansCN-Bold" → "Noto Sans SC") so text
+ * overrides can reference either name.
+ */
+async function registerFontDir(cwd, dir) {
+  const absolute = await resolveInWorkspace(cwd, dir)
+  const stat = await fs.stat(absolute)
+  const files = stat.isDirectory()
+    ? (await fs.readdir(absolute, { withFileTypes: true }))
+        .filter((entry) => entry.isFile())
+        .map((entry) => path.join(absolute, entry.name))
+    : [absolute]
+
+  const registered = []
+  const skipped = []
+  for (const full of files) {
+    const extension = path.extname(full).toLowerCase()
+    if (!FONT_EXTENSIONS.has(extension)) {
+      skipped.push(path.basename(full))
+      continue
+    }
+    const stem = path.basename(full, extension).replace(/_+/g, ' ').trim() || 'font'
+    try {
+      GlobalFonts.registerFromPath(full, stem)
+      registered.push(stem)
+      const mapped = fontFamilyOf(stem)
+      if (mapped && mapped !== stem && !GlobalFonts.has(mapped)) {
+        try {
+          GlobalFonts.registerFromPath(full, mapped)
+          registered.push(mapped)
+        } catch {
+          /* the mapped alias is taken by another face */
+        }
+      }
+    } catch {
+      skipped.push(path.basename(full))
+    }
+  }
+  return { registered, skipped }
+}
 
 async function resolveInWorkspace(cwd, candidate, { mustExist = true } = {}) {
   if (typeof candidate !== 'string' || candidate.trim() === '') {
@@ -163,6 +207,7 @@ export async function inspectTemplate({ cwd, template }) {
       if (entry.kind === 'text') layer.text = true
       if (entry.text) {
         layer.textContent = entry.text.value
+        layer.textAlign = entry.text.align
         layer.runCount = entry.text.runs.length
         if (entry.text.runs.length) layer.runs = entry.text.runs.slice(0, 8)
       }
@@ -199,6 +244,9 @@ export async function renderBatch({
   anchor = 'center',
   fill = 1,
   adjustments = {},
+  text,
+  textBySku,
+  fontDir,
   zip = false,
 }) {
   const absolute = await resolveInWorkspace(cwd, template)
@@ -216,6 +264,37 @@ export async function renderBatch({
   const skuFiles = await listSkuFiles(cwd, { skus, skuDir })
   if (skuFiles.length === 0) {
     throw new Error('No SKU images were found. Pass `skus` paths or a `skuDir` folder.')
+  }
+
+  let fontsRegistered
+  let fontsSkipped
+  if (fontDir) {
+    const registration = await registerFontDir(cwd, fontDir)
+    fontsRegistered = [...new Set(registration.registered)]
+    fontsSkipped = registration.skipped
+  }
+
+  // Distinct override sets get their own composited scene; SKUs sharing the
+  // same text reuse it, so a price that changes per SKU is the only slow case.
+  const variantCache = new Map()
+  const textWarnings = []
+  const sceneFor = (file) => {
+    const base = path.basename(file, path.extname(file))
+    const overrides = mergeOverrideLists(
+      text,
+      textBySku ? (textBySku[path.basename(file)] ?? textBySku[base]) : undefined,
+    )
+    if (!overrides) return { scene: doc.scene, warnings: [] }
+    const signature = JSON.stringify(overrides)
+    let variant = variantCache.get(signature)
+    if (!variant) {
+      const clone = cloneDoc(doc)
+      const warnings = applyTextOverrides(clone, overrides, (family) => GlobalFonts.has(family))
+      clone.scene = buildScene(clone)
+      variant = { scene: clone.scene, warnings }
+      variantCache.set(signature, variant)
+    }
+    return variant
   }
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
@@ -241,6 +320,8 @@ export async function renderBatch({
     const content = measureContent(image)
     const base = path.basename(file, path.extname(file))
     const adjust = toAdjustment(adjustments[path.basename(file)] ?? adjustments[base])
+    const variant = sceneFor(file)
+    textWarnings.push(...variant.warnings)
 
     const canvas = createCanvas(doc.width, doc.height)
     const ctx = canvas.getContext('2d')
@@ -248,7 +329,7 @@ export async function renderBatch({
       ctx.fillStyle = '#ffffff'
       ctx.fillRect(0, 0, doc.width, doc.height)
     }
-    drawScene(ctx, doc.scene, image, content, settings, adjust)
+    drawScene(ctx, variant.scene, image, content, settings, adjust)
 
     const buffer = canvas.toBuffer(mime, isPng ? undefined : Math.round(quality))
     const name = uniqueName(used, sanitizeName(base), extension)
@@ -275,6 +356,10 @@ export async function renderBatch({
       bounds: [slot.rect.x, slot.rect.y, slot.rect.x + slot.rect.w, slot.rect.y + slot.rect.h],
     })),
     suppressed: doc.scene.suppressed.slice(0, 50),
+    textVariants: variantCache.size,
+    ...(fontsRegistered ? { fontsRegistered } : {}),
+    ...(fontsSkipped && fontsSkipped.length ? { fontsSkipped } : {}),
+    ...(textWarnings.length ? { textWarnings: [...new Set(textWarnings)] } : {}),
     ...(zipPath ? { zip: path.relative(cwd, zipPath) } : {}),
   }
 }
@@ -329,6 +414,7 @@ export function registerTools(ctx) {
                   leafId: { type: 'string' },
                   bounds: { type: 'array', items: { type: 'integer' } },
                   textContent: { type: 'string' },
+                  textAlign: { type: 'string', enum: ['left', 'center', 'right'] },
                   runs: {
                     type: 'array',
                     items: {
@@ -387,7 +473,7 @@ export function registerTools(ctx) {
     ctx.tools.register({
       name: 'psd_batch_render',
       description:
-        'Render a PSD/PSB main-image template with many SKU images at once. Each SKU image is trimmed to its visible content, fitted into the product slots, composited between the template layers, and written as JPG/PNG into a workspace folder. Visible sibling layers that overlap a slot are suppressed together with the slot (reported as `suppressed`) so stale product art cannot show through. Returns the output folder and file names; optionally packs a ZIP.',
+        'Render a PSD/PSB main-image template with many SKU images at once. Each SKU image is trimmed to its visible content, fitted into the product slots, composited between the template layers, and written as JPG/PNG into a workspace folder. Visible sibling layers that overlap a slot are suppressed together with the slot (reported as `suppressed`) so stale product art cannot show through. Text layers can be rewritten per batch (`text`) or per SKU (`textBySku`) — re-rendered with real glyphs, not pasted pixels; register brand fonts first with `fontDir`. Returns the output folder and file names; optionally packs a ZIP.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -411,6 +497,84 @@ export function registerTools(ctx) {
             items: { type: 'string' },
             description:
               'Product slot layer names or leaf ids. Omit to use the auto-detected slots reported by psd_inspect.',
+          },
+          text: {
+            type: 'array',
+            description:
+              'Rewrite text layers in every render: [{layer, value, runs, font, weight, size, color, tracking}]. `layer` is a layer name or leaf id; `value` replaces the copy (styles follow their characters); `runs` [{len, family?, weight?, size?, color?, tracking?}] restyles exact segments; flat font/weight/size/color/tracking restyle all runs. `size` is in pt, exactly what psd_inspect reports; color is #rrggbb.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['layer'],
+              properties: {
+                layer: { type: 'string' },
+                value: { type: 'string' },
+                runs: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    required: ['len'],
+                    properties: {
+                      len: { type: 'integer' },
+                      family: { type: 'string' },
+                      weight: { type: 'number' },
+                      size: { type: 'number' },
+                      color: { type: 'string' },
+                      tracking: { type: 'number' },
+                    },
+                  },
+                },
+                font: { type: 'string' },
+                weight: { type: 'number' },
+                size: { type: 'number' },
+                color: { type: 'string' },
+                tracking: { type: 'number' },
+              },
+            },
+          },
+          textBySku: {
+            type: 'object',
+            additionalProperties: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['layer'],
+                properties: {
+                  layer: { type: 'string' },
+                  value: { type: 'string' },
+                  runs: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
+                      required: ['len'],
+                      properties: {
+                        len: { type: 'integer' },
+                        family: { type: 'string' },
+                        weight: { type: 'number' },
+                        size: { type: 'number' },
+                        color: { type: 'string' },
+                        tracking: { type: 'number' },
+                      },
+                    },
+                  },
+                  font: { type: 'string' },
+                  weight: { type: 'number' },
+                  size: { type: 'number' },
+                  color: { type: 'string' },
+                  tracking: { type: 'number' },
+                },
+              },
+            },
+            description:
+              'Per-SKU text overrides keyed by SKU file name (with or without extension), same shape as `text`; entries win over `text` per layer. Use it to give every SKU its own price.',
+          },
+          fontDir: {
+            type: 'string',
+            description:
+              'Directory of .ttf/.otf font files to register before rendering. Registered family names (file stems) are returned in `fontsRegistered`.',
           },
           outDir: {
             type: 'string',
@@ -442,7 +606,7 @@ export function registerTools(ctx) {
         schema: {
           type: 'object',
           additionalProperties: false,
-          required: ['count', 'outDir', 'files', 'slots', 'suppressed'],
+          required: ['count', 'outDir', 'files', 'slots', 'suppressed', 'textVariants'],
           properties: {
             count: { type: 'integer' },
             outDir: { type: 'string' },
@@ -474,6 +638,10 @@ export function registerTools(ctx) {
                 },
               },
             },
+            textVariants: { type: 'integer' },
+            textWarnings: { type: 'array', items: { type: 'string' } },
+            fontsRegistered: { type: 'array', items: { type: 'string' } },
+            fontsSkipped: { type: 'array', items: { type: 'string' } },
           },
         },
         render: (_args, value) => [
@@ -486,6 +654,14 @@ export function registerTools(ctx) {
                 ? `\nSuppressed overlapping slot siblings (hidden with the slot): ${value.suppressed
                     .map((layer) => layer.name)
                     .join(', ')}`
+                : ''
+            }${value.textVariants ? `\nText rewritten in ${value.textVariants} variant(s).` : ''}${
+              value.fontsRegistered && value.fontsRegistered.length
+                ? `\nFonts registered: ${value.fontsRegistered.join(', ')}`
+                : ''
+            }${
+              value.textWarnings && value.textWarnings.length
+                ? `\nText warnings: ${value.textWarnings.slice(0, 8).join('；')}`
                 : ''
             }${value.zip ? `\nZIP: ${value.zip}` : ''}`,
           },
@@ -507,6 +683,9 @@ export function registerTools(ctx) {
           anchor: args.anchor,
           fill: args.fill,
           adjustments: args.adjustments,
+          text: args.text,
+          textBySku: args.textBySku,
+          fontDir: args.fontDir,
           zip: args.zip,
         })
       },

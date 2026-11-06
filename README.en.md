@@ -68,6 +68,10 @@ out/0715-main/*.jpg  (+ optional ZIP)
   width / cover, plus anchor and fill controls.
 - **Canvas fine-tune** — drag the product, scale with corner handles, set
   offset/scale/rotation numerically, and copy one adjustment to the whole batch.
+- **Text overrides** — price bars and campaign copy can be rewritten per batch or
+  per SKU and re-rendered with real glyphs from the PSD's style runs (not pasted
+  pixels); the workbench panel edits the same data, and exports match once fonts
+  are loaded.
 - **Export** — JPG or PNG at the template resolution, one file per SKU, packed
   into a ZIP when requested.
 - **Agent tools** — `psd_inspect` and `psd_batch_render` expose the same pipeline
@@ -150,8 +154,8 @@ npm test
 
 | Tool | Purpose |
 | --- | --- |
-| `psd_inspect` | Template size, layer tree (name, depth, visibility, bounds, leaf id), and auto-detected slots. Text layers also report their copy plus per-run styles (family, weight, size, color). |
-| `psd_batch_render` | Render many SKUs into one template and write JPG/PNG files (optionally a ZIP) inside the workspace. The `suppressed` result lists slot siblings hidden together with the slot. |
+| `psd_inspect` | Template size, layer tree (name, depth, visibility, bounds, leaf id), and auto-detected slots. Text layers also report their copy, alignment, and per-run styles (family, weight, size, color). |
+| `psd_batch_render` | Render many SKUs into one template and write JPG/PNG files (optionally a ZIP) inside the workspace. Supports `text` / `textBySku` text rewriting and `fontDir` font registration; the `suppressed` result lists slot siblings hidden together with the slot. |
 
 Example request:
 
@@ -182,6 +186,41 @@ decorations that intentionally sit on top of the product should live in another
 group. Near-identical stacked copies (shadow/highlight) keep using the existing
 slot-cluster logic, and the slot fit rect is never inflated by suppression.
 
+### Text overrides
+
+Text layers render from their rasterized pixels by default; `text` / `textBySku`
+re-render them with real glyphs from the PSD's style runs:
+
+```json
+{
+  "template": "templates/summer-main.psd",
+  "skuDir": "skus/0715",
+  "fontDir": "fonts/campaign",
+  "text": [{ "layer": "campaign title", "value": "618 SALE" }],
+  "textBySku": {
+    "sku-001": [{ "layer": "price", "value": "¥16.80",
+                  "runs": [{ "len": 3, "family": "DIN Alternate", "weight": 700 }, { "len": 3 }] }],
+    "sku-002": [{ "layer": "price", "value": "¥19.90" }]
+  }
+}
+```
+
+- `layer` takes a layer name or leaf id. `value` rewrites the copy — every
+  character keeps its original style, so the common "swap the price" case needs
+  nothing else. `runs` restyle exact segments (family/weight/size/color/
+  tracking); `size` is in pt, matching the per-run styles `psd_inspect` reports.
+  Flat `font`/`weight`/`size`/`color` apply to the whole layer.
+- `textBySku` is keyed by SKU file name (with or without extension) and wins
+  over `text` per layer — give every SKU its own price. Distinct override sets
+  each produce a cached scene, so all-distinct prices are the slow path.
+- `fontDir` registers .ttf/.otf/.ttc files (family = file stem) and echoes them
+  in `fontsRegistered`; unresolvable fonts still render (canvas fallback) and
+  are named in `textWarnings`.
+- The workbench's **Text overrides** panel edits the same data: type a new
+  value and press Enter, `{}` edits the runs JSON (same shape as the `text`
+  parameter), and the **Fonts** button loads local font files so preview and
+  export agree.
+
 ## How it works
 
 - PSD/PSB parsing uses [`ag-psd`](https://github.com/Agamnentzar/ag-psd): layer
@@ -207,8 +246,9 @@ server.js      built Host artifact
 
 ## Compatibility and limits
 
-- Text layers are used as rasterized PSD pixels; editing copy/fonts inside the
-  studio is not supported yet.
+- Text layers default to their rasterized PSD pixels; `text` / `textBySku`
+  rewrite them with live glyphs (see the agent-tools section), and unregistered
+  fonts fall back with a warning in the result.
 - Bevel/emboss and inner-shadow layer styles are approximated or skipped;
   stroke/shadow/glow are approximations. The compositor is tuned for typical
   e-commerce main-image templates.

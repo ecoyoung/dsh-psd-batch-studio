@@ -8,6 +8,7 @@
  */
 import { readPsd } from 'ag-psd'
 import { createCanvas } from './canvas.js'
+import { describeTextLayer } from './text.js'
 
 const makeCanvas = createCanvas
 
@@ -90,116 +91,6 @@ export async function parseTemplate(file, onStage = () => {}) {
     slots: new Set(),
     size: file.size,
   }
-}
-
-/** PSD font names arrive squashed ("PingFangSC-Regular"); map the common ones. */
-const FONT_FAMILY_MAP = [
-  [/^PingFangSC/i, 'PingFang SC'],
-  [/^PingFang/i, 'PingFang SC'],
-  [/^HiraginoSansGB/i, 'Hiragino Sans GB'],
-  [/^MicrosoftYaHei/i, 'Microsoft YaHei'],
-  [/^MicrosoftJhengHei/i, 'Microsoft JhengHei'],
-  [/^(SourceHanSans|SourceHanSansCN|NotoSansSC|NotoSansCJK)/i, 'Noto Sans SC'],
-  [/^SourceHanSerif/i, 'Noto Serif SC'],
-  [/^SimHei|^STHeiti/i, 'Heiti SC'],
-  [/^SimSun|^STSong/i, 'Songti SC'],
-  [/^AlibabaPuHuiTi/i, 'Alibaba PuHuiTi'],
-  [/^OPPOSans/i, 'OPPO Sans'],
-  [/^HarmonyOS/i, 'HarmonyOS Sans'],
-  [/^DIN/i, 'DIN Alternate'],
-  [/^ArialMT|^Arial/i, 'Arial'],
-  [/^HelveticaNeue|^Helvetica/i, 'Helvetica Neue'],
-  [/^Inter/i, 'Inter'],
-  [/^Roboto/i, 'Roboto'],
-]
-
-function fontFamilyOf(name) {
-  const raw = String(name || '')
-  for (const [pattern, family] of FONT_FAMILY_MAP) {
-    if (pattern.test(raw)) return family
-  }
-  return raw.split(/[-_ ]/)[0] || raw || null
-}
-
-function fontWeightOf(name, fauxBold) {
-  const raw = String(name || '').toLowerCase()
-  if (/heavy|black|extrabold|ultrabold/.test(raw)) return 800
-  if (/semibold|demibold|bold/.test(raw)) return 700
-  if (/medium/.test(raw)) return 500
-  if (/light|thin/.test(raw)) return 300
-  return fauxBold ? 700 : 400
-}
-
-function describeTextStyle(raw) {
-  const style = raw || {}
-  const color = style.fillColor || {}
-  return {
-    family: fontFamilyOf(style.font ? style.font.name : ''),
-    weight: fontWeightOf(style.font ? style.font.name : '', style.fauxBold),
-    size: Math.round((style.fontSize || 0) * 100) / 100,
-    color: [
-      Math.round(color.r ?? 0),
-      Math.round(color.g ?? 0),
-      Math.round(color.b ?? 0),
-    ],
-    tracking: style.tracking || 0,
-  }
-}
-
-// styleRuns only carry the fields that differ from the base style, so each run
-// must be merged over it.
-function mergeTextStyle(base, raw) {
-  const style = (raw && raw.style) || {}
-  const has = (key) => style[key] !== undefined && style[key] !== null
-  const merged = { ...base }
-  if (has('font') && style.font && style.font.name) {
-    merged.family = fontFamilyOf(style.font.name)
-    merged.weight = fontWeightOf(style.font.name, style.fauxBold)
-  } else if (has('fauxBold')) {
-    merged.weight = fontWeightOf(merged.family, style.fauxBold)
-  }
-  if (has('fontSize') && style.fontSize > 0) merged.size = Math.round(style.fontSize * 100) / 100
-  if (has('fillColor') && style.fillColor) {
-    merged.color = [
-      Math.round(style.fillColor.r ?? 0),
-      Math.round(style.fillColor.g ?? 0),
-      Math.round(style.fillColor.b ?? 0),
-    ]
-  }
-  if (has('tracking')) merged.tracking = style.tracking
-  return merged
-}
-
-/**
- * Summarize a text layer: its content plus one style entry per run, so an
- * agent can see what a price layer looks like before rendering anything.
- */
-function describeTextLayer(text) {
-  const style = Array.isArray(text.style) ? text.style[0] : text.style || {}
-  const base = describeTextStyle(style)
-  const value = String(text.text || '').replace(/\r$/, '').replace(/\r/g, '\n')
-  const runs = []
-  for (const run of text.styleRuns || []) {
-    const length = Math.max(0, Math.round(run.length || 0))
-    if (!length) continue
-    runs.push({ len: length, ...mergeTextStyle(base, run) })
-  }
-  let total = runs.reduce((sum, run) => sum + run.len, 0)
-  if (total !== value.length && runs.length) {
-    if (total < value.length) {
-      runs.push({ len: value.length - total, ...base })
-    } else {
-      let left = value.length
-      for (let index = 0; index < runs.length && left > 0; index += 1) {
-        runs[index].len = Math.min(runs[index].len, left)
-        left -= runs[index].len
-      }
-      while (runs.length && runs[runs.length - 1].len <= 0) runs.pop()
-    }
-    total = runs.reduce((sum, run) => sum + run.len, 0)
-  }
-  if (!runs.length && value.length) runs.push({ len: value.length, ...base })
-  return { value, runs }
 }
 
 function buildTree(psd) {
