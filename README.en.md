@@ -127,6 +127,12 @@ npm install
 npm run build
 ```
 
+Run the self-contained smoke test (generates a fixture PSD in a temp folder):
+
+```bash
+npm test
+```
+
 ## Using the workbench
 
 1. Open the **PSD Batch Studio** panel from the sidebar.
@@ -144,8 +150,8 @@ npm run build
 
 | Tool | Purpose |
 | --- | --- |
-| `psd_inspect` | Template size, layer tree (name, depth, visibility, bounds, leaf id), and auto-detected slots. |
-| `psd_batch_render` | Render many SKUs into one template and write JPG/PNG files (optionally a ZIP) inside the workspace. |
+| `psd_inspect` | Template size, layer tree (name, depth, visibility, bounds, leaf id), and auto-detected slots. Text layers also report their copy plus per-run styles (family, weight, size, color). |
+| `psd_batch_render` | Render many SKUs into one template and write JPG/PNG files (optionally a ZIP) inside the workspace. The `suppressed` result lists slot siblings hidden together with the slot. |
 
 Example request:
 
@@ -167,6 +173,14 @@ Example request:
 Both tools resolve paths relative to the session working directory and refuse
 paths outside it. `psd_batch_render` defaults to JPG at quality 92 and returns
 the output folder plus the first 50 file names.
+
+Visible siblings inside a slot's group that overlap the slot by at least 25% are
+hidden together with the slot (stale product art and misaligned shadow copies
+are the usual offenders); otherwise the new SKU would stack on top of the old
+product's pixels. Suppressed layers are reported in the `suppressed` result, and
+decorations that intentionally sit on top of the product should live in another
+group. Near-identical stacked copies (shadow/highlight) keep using the existing
+slot-cluster logic, and the slot fit rect is never inflated by suppression.
 
 ## How it works
 

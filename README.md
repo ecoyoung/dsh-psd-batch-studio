@@ -105,8 +105,8 @@ plugin_manager install_bundle, target = /绝对路径/dsh-psd-batch-studio
 
 | 工具 | 作用 |
 | --- | --- |
-| `psd_inspect` | 返回模板尺寸、图层树（名称/层级/可见性/边界/图层 id）和自动识别的商品槽位。 |
-| `psd_batch_render` | 把一批 SKU 套进模板，输出 JPG/PNG（可选 ZIP）到工作区。 |
+| `psd_inspect` | 返回模板尺寸、图层树（名称/层级/可见性/边界/图层 id）、自动识别的商品槽位；文字层额外返回文案和逐段字体样式（字体/字重/字号/颜色）。 |
+| `psd_batch_render` | 把一批 SKU 套进模板，输出 JPG/PNG（可选 ZIP）到工作区；结果里的 `suppressed` 列出随槽位一起隐藏的同组重叠图层。 |
 
 调用示例：
 
@@ -128,11 +128,22 @@ plugin_manager install_bundle, target = /绝对路径/dsh-psd-batch-studio
 两个工具的路径都相对当前会话工作目录解析，并拒绝越界路径。`psd_batch_render` 默认 JPG、质量 92，
 返回输出目录和前 50 个文件名。
 
+槽位所在的组里，其它「可见且与槽位重叠 ≥25%」的图层会随槽位一起隐藏（旧商品图、没对齐的
+影子层最常见），否则新 SKU 会在旧商品的像素上叠加出「两个商品」。被隐藏的图层会在结果里以
+`suppressed` 列出；刻意的压在商品上的装饰请放到其他组里。近乎完全重叠且大小一致的堆叠副本
+（阴影/高光）仍走原有槽位簇逻辑，槽位适配框不受影响。
+
 ## 构建
 
 ```bash
 npm install
 npm run build
+```
+
+测试：
+
+```bash
+npm test
 ```
 
 ## 已知限制

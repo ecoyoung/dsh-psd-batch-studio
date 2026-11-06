@@ -16447,6 +16447,120 @@ async function parseTemplate(file, onStage = () => {
     size: file.size
   };
 }
+var FONT_FAMILY_MAP = [
+  [/^PingFangSC/i, "PingFang SC"],
+  [/^PingFang/i, "PingFang SC"],
+  [/^HiraginoSansGB/i, "Hiragino Sans GB"],
+  [/^MicrosoftYaHei/i, "Microsoft YaHei"],
+  [/^MicrosoftJhengHei/i, "Microsoft JhengHei"],
+  [/^(SourceHanSans|SourceHanSansCN|NotoSansSC|NotoSansCJK)/i, "Noto Sans SC"],
+  [/^SourceHanSerif/i, "Noto Serif SC"],
+  [/^SimHei|^STHeiti/i, "Heiti SC"],
+  [/^SimSun|^STSong/i, "Songti SC"],
+  [/^AlibabaPuHuiTi/i, "Alibaba PuHuiTi"],
+  [/^OPPOSans/i, "OPPO Sans"],
+  [/^HarmonyOS/i, "HarmonyOS Sans"],
+  [/^DIN/i, "DIN Alternate"],
+  [/^ArialMT|^Arial/i, "Arial"],
+  [/^HelveticaNeue|^Helvetica/i, "Helvetica Neue"],
+  [/^Inter/i, "Inter"],
+  [/^Roboto/i, "Roboto"]
+];
+function fontFamilyOf(name) {
+  const raw = String(name || "");
+  for (const [pattern, family] of FONT_FAMILY_MAP) {
+    if (pattern.test(raw)) return family;
+  }
+  return raw.split(/[-_ ]/)[0] || raw || null;
+}
+function fontWeightOf(name, fauxBold) {
+  const raw = String(name || "").toLowerCase();
+  if (/heavy|black|extrabold|ultrabold/.test(raw)) return 800;
+  if (/semibold|demibold|bold/.test(raw)) return 700;
+  if (/medium/.test(raw)) return 500;
+  if (/light|thin/.test(raw)) return 300;
+  return fauxBold ? 700 : 400;
+}
+function fillColorOf(fill) {
+  if (!fill) return [0, 0, 0];
+  if (fill.r != null) {
+    return [Math.round(fill.r ?? 0), Math.round(fill.g ?? 0), Math.round(fill.b ?? 0)];
+  }
+  if (fill.k != null && fill.c == null) {
+    const value = Math.round(fill.k);
+    return [value, value, value];
+  }
+  if (fill.c != null) {
+    const c = (fill.c ?? 0) / 255;
+    const m = (fill.m ?? 0) / 255;
+    const y = (fill.y ?? 0) / 255;
+    const k = (fill.k ?? 0) / 255;
+    return [
+      Math.round(255 * (1 - c) * (1 - k)),
+      Math.round(255 * (1 - m) * (1 - k)),
+      Math.round(255 * (1 - y) * (1 - k))
+    ];
+  }
+  return [0, 0, 0];
+}
+function describeTextStyle(raw) {
+  const style = raw || {};
+  return {
+    family: fontFamilyOf(style.font ? style.font.name : ""),
+    weight: fontWeightOf(style.font ? style.font.name : "", style.fauxBold),
+    size: Math.round((style.fontSize || 0) * 100) / 100,
+    color: fillColorOf(style.fillColor),
+    tracking: style.tracking || 0
+  };
+}
+function mergeTextStyle(base, raw, baseStyle) {
+  const style = raw && raw.style || {};
+  const has = (key) => style[key] !== void 0 && style[key] !== null;
+  const merged = { ...base };
+  if (has("font") && style.font && style.font.name) {
+    merged.family = fontFamilyOf(style.font.name);
+    merged.weight = fontWeightOf(style.font.name, has("fauxBold") ? style.fauxBold : baseStyle?.fauxBold);
+  } else if (has("fauxBold")) {
+    merged.weight = fontWeightOf(merged.family, style.fauxBold);
+  }
+  if (has("fontSize") && style.fontSize > 0) merged.size = Math.round(style.fontSize * 100) / 100;
+  if (has("fillColor") && style.fillColor) {
+    merged.color = [
+      Math.round(style.fillColor.r ?? 0),
+      Math.round(style.fillColor.g ?? 0),
+      Math.round(style.fillColor.b ?? 0)
+    ];
+  }
+  if (has("tracking")) merged.tracking = style.tracking;
+  return merged;
+}
+function describeTextLayer(text) {
+  const style = Array.isArray(text.style) ? text.style[0] : text.style || {};
+  const base = describeTextStyle(style);
+  const value = String(text.text || "").replace(/\r$/, "").replace(/\r/g, "\n");
+  const runs = [];
+  for (const run of text.styleRuns || []) {
+    const length = Math.max(0, Math.round(run.length || 0));
+    if (!length) continue;
+    runs.push({ len: length, ...mergeTextStyle(base, run, style) });
+  }
+  let total = runs.reduce((sum, run) => sum + run.len, 0);
+  if (total !== value.length && runs.length) {
+    if (total < value.length) {
+      runs.push({ len: value.length - total, ...base });
+    } else {
+      let left = value.length;
+      for (let index = 0; index < runs.length && left > 0; index += 1) {
+        runs[index].len = Math.min(runs[index].len, left);
+        left -= runs[index].len;
+      }
+      while (runs.length && runs[runs.length - 1].len <= 0) runs.pop();
+    }
+    total = runs.reduce((sum, run) => sum + run.len, 0);
+  }
+  if (!runs.length && value.length) runs.push({ len: value.length, ...base });
+  return { value, runs };
+}
 function buildTree(psd) {
   const entries = [];
   const leaves = [];
@@ -16464,6 +16578,7 @@ function buildTree(psd) {
         parentId,
         path: [...ancestorIds, id]
       };
+      if (!isGroup && node.text) entry.text = describeTextLayer(node.text);
       entries.push(entry);
       if (isGroup) {
         walk(node.children, depth + 1, entry.path, inheritedOpacity * (node.opacity ?? 1), id);
@@ -16540,12 +16655,6 @@ function suggestSlots(doc) {
   }
   scored.sort((a, b) => b.score - a.score);
   if (scored.length === 0) return [];
-  const overlaps = (a, b) => {
-    const width = Math.min(a.left + a.width, b.left + b.width) - Math.max(a.left, b.left);
-    const height = Math.min(a.top + a.height, b.top + b.height) - Math.max(a.top, b.top);
-    if (width <= 0 || height <= 0) return 0;
-    return width * height / Math.min(a.width * a.height, b.width * b.height);
-  };
   const best = scored[0];
   const picked = [best.leaf];
   for (const candidate of scored.slice(1)) {
@@ -16553,7 +16662,7 @@ function suggestSlots(doc) {
     const leaf = candidate.leaf;
     const sameSize = Math.abs(leaf.width - best.leaf.width) <= best.leaf.width * 0.35 && Math.abs(leaf.height - best.leaf.height) <= best.leaf.height * 0.35;
     const sameRow = Math.abs(leaf.top - best.leaf.top) <= docH * 0.06;
-    const crowded = picked.some((other) => overlaps(other, leaf) > 0.6);
+    const crowded = picked.some((other) => boundsOverlapRatio(leafBounds(other), leafBounds(leaf)) > 0.6);
     if (sameSize && sameRow && !crowded) picked.push(leaf);
   }
   return picked.map((leaf) => leaf.id);
@@ -16743,6 +16852,14 @@ function leafBounds(leaf) {
     bottom: leaf.top + leaf.height
   };
 }
+function boundsOverlapRatio(a, b) {
+  const width = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+  const height = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+  if (width <= 0 || height <= 0) return 0;
+  const areaA = (a.right - a.left) * (a.bottom - a.top);
+  const areaB = (b.right - b.left) * (b.bottom - b.top);
+  return width * height / Math.min(areaA, areaB);
+}
 function unionBounds(a, b) {
   return {
     left: Math.min(a.left, b.left),
@@ -16769,27 +16886,28 @@ function isStackedCopy(base, other, doc) {
   if (Math.abs(a.top - b.top) > doc.height * 0.03) return false;
   return true;
 }
+var SLOT_SIBLING_OVERLAP = 0.25;
 function buildScene(doc) {
   const visibleLeaves = doc.leaves.filter((leaf) => isLeafVisible(doc, leaf));
+  const entryById = new Map(doc.entries.map((entry) => [entry.id, entry]));
   const clusters = [];
+  const clusterOf = /* @__PURE__ */ new Map();
   const claimed = /* @__PURE__ */ new Set();
+  const suppressed = [];
   for (const leaf of visibleLeaves) {
     if (!doc.slots.has(leaf.id) || claimed.has(leaf.id)) continue;
-    const members = [leaf];
     claimed.add(leaf.id);
     let rect = leafBounds(leaf);
     for (const other of visibleLeaves) {
       if (claimed.has(other.id) || doc.slots.has(other.id)) continue;
       if (!isStackedCopy(leaf, other, doc)) continue;
-      members.push(other);
       claimed.add(other.id);
       rect = unionBounds(rect, leafBounds(other));
     }
-    clusters.push({
+    const cluster = {
       id: leaf.id,
       name: leaf.name,
-      names: members.map((member) => member.name),
-      members: new Set(members.map((member) => member.id)),
+      members: /* @__PURE__ */ new Set([leaf.id]),
       rect: {
         x: rect.left,
         y: rect.top,
@@ -16797,11 +16915,26 @@ function buildScene(doc) {
         h: rect.bottom - rect.top
       },
       emitted: false
-    });
+    };
+    clusters.push(cluster);
+    clusterOf.set(leaf.id, cluster);
+    for (const other of visibleLeaves) {
+      if (cluster.members.has(other.id)) clusterOf.set(other.id, cluster);
+    }
   }
-  const clusterOf = /* @__PURE__ */ new Map();
   for (const cluster of clusters) {
-    for (const memberId of cluster.members) clusterOf.set(memberId, cluster);
+    const leaf = visibleLeaves.find((item) => item.id === cluster.id);
+    const parent = entryById.get(leaf.entryId)?.parentId;
+    if (!parent) continue;
+    for (const other of visibleLeaves) {
+      if (claimed.has(other.id) || doc.slots.has(other.id)) continue;
+      if (!other.path.includes(parent)) continue;
+      if (boundsOverlapRatio(leafBounds(leaf), leafBounds(other)) < SLOT_SIBLING_OVERLAP) continue;
+      cluster.members.add(other.id);
+      claimed.add(other.id);
+      clusterOf.set(other.id, cluster);
+      suppressed.push({ leafId: other.id, name: other.name });
+    }
   }
   const parts = [];
   let run = [];
@@ -16812,14 +16945,14 @@ function buildScene(doc) {
   };
   for (const leaf of visibleLeaves) {
     const cluster = clusterOf.get(leaf.id);
-    if (cluster) {
-      if (cluster.emitted) continue;
-      cluster.emitted = true;
-      flush();
-      parts.push({ kind: "slot", leafId: cluster.id, name: cluster.name, rect: cluster.rect });
+    if (!cluster) {
+      run.push(leaf);
       continue;
     }
-    run.push(leaf);
+    if (leaf.id !== cluster.id || cluster.emitted) continue;
+    cluster.emitted = true;
+    flush();
+    parts.push({ kind: "slot", leafId: cluster.id, name: cluster.name, rect: cluster.rect });
   }
   flush();
   if (parts.length === 0) {
@@ -16828,6 +16961,7 @@ function buildScene(doc) {
   return {
     parts,
     slots: parts.filter((part) => part.kind === "slot"),
+    suppressed,
     width: doc.width,
     height: doc.height
   };
@@ -17044,6 +17178,16 @@ function toAdjustment(raw) {
   }
   return adjust;
 }
+function describeTextLayers(layers) {
+  const lines = layers.filter((layer) => layer.textContent != null).slice(0, 12).map((layer) => {
+    const run = (layer.runs || [])[0];
+    const font = run ? ` ${run.family || "?"} ${run.size}pt` : "";
+    return `  ${layer.name}: ${JSON.stringify(layer.textContent)}${font}`;
+  });
+  return lines.length ? `
+Text layers:
+${lines.join("\n")}` : "";
+}
 async function listSkuFiles(cwd, { skus, skuDir }) {
   const files = [];
   if (Array.isArray(skus)) {
@@ -17073,6 +17217,14 @@ async function inspectTemplate({ cwd, template }) {
     };
     if (entry.leafId) layer.leafId = entry.leafId;
     if (entry.kind === "text") layer.text = true;
+    if (entry.text) {
+      layer.textContent = entry.text.value;
+      layer.runCount = entry.text.runs.length;
+      if (entry.text.runs.length) {
+        layer.runs = entry.text.runs.slice(0, 8);
+        layer.runsTruncated = entry.text.runs.length > 8;
+      }
+    }
     if (entry.bounds) layer.bounds = entry.bounds;
     return layer;
   });
@@ -17164,6 +17316,9 @@ async function renderBatch({
       leafId: slot.leafId,
       bounds: [slot.rect.x, slot.rect.y, slot.rect.x + slot.rect.w, slot.rect.y + slot.rect.h]
     })),
+    suppressed: doc.scene.suppressed.slice(0, 50),
+    suppressedCount: doc.scene.suppressed.length,
+    suppressedTruncated: doc.scene.suppressed.length > 50,
     ...zipPath ? { zip: path.relative(cwd, zipPath) } : {}
   };
 }
@@ -17172,7 +17327,7 @@ function registerTools(ctx) {
   disposers.push(
     ctx.tools.register({
       name: "psd_inspect",
-      description: "Inspect a PSD/PSB main-image template inside the session workspace. Returns its size, the layer tree (names, depth, visibility, bounds, ids) and the product slots the studio would auto-detect. Use this before psd_batch_render when you need to choose slot layers.",
+      description: "Inspect a PSD/PSB main-image template inside the session workspace. Returns its size, the layer tree (names, depth, visibility, bounds, ids), product slots the studio would auto-detect, and \u2014 for text layers \u2014 the copy plus per-run font styles (family, weight, size, color). Use this before psd_batch_render when you need to choose slot layers or check what a text layer says.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -17207,7 +17362,26 @@ function registerTools(ctx) {
                   visible: { type: "boolean" },
                   text: { type: "boolean" },
                   leafId: { type: "string" },
-                  bounds: { type: "array", items: { type: "integer" } }
+                  bounds: { type: "array", items: { type: "integer" } },
+                  textContent: { type: "string" },
+                  runs: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      required: ["len"],
+                      properties: {
+                        len: { type: "integer" },
+                        family: { type: ["string", "null"] },
+                        weight: { type: "integer" },
+                        size: { type: "number" },
+                        color: { type: "array", items: { type: "integer" } },
+                        tracking: { type: "number" }
+                      }
+                    }
+                  },
+                  runCount: { type: "integer" },
+                  runsTruncated: { type: "boolean" }
                 }
               }
             },
@@ -17230,7 +17404,7 @@ function registerTools(ctx) {
           {
             type: "text",
             text: `${value.name}: ${value.width}\xD7${value.height}, ${value.layers.length} listed layers.
-Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.join(",")}]`).join(" | ") || "none"}`
+Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.join(",")}]`).join(" | ") || "none"}${describeTextLayers(value.layers)}`
           }
         ]
       },
@@ -17245,7 +17419,7 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
   disposers.push(
     ctx.tools.register({
       name: "psd_batch_render",
-      description: "Render a PSD/PSB main-image template with many SKU images at once. Each SKU image is trimmed to its visible content, fitted into the product slots, composited between the template layers, and written as JPG/PNG into a workspace folder. Returns the output folder and file names; optionally packs a ZIP.",
+      description: "Render a PSD/PSB main-image template with many SKU images at once. Each SKU image is trimmed to its visible content, fitted into the product slots, composited between the template layers, and written as JPG/PNG into a workspace folder. Visible sibling layers that overlap a slot are suppressed together with the slot (reported as `suppressed`) so stale product art cannot show through. Returns the output folder and file names; optionally packs a ZIP.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -17298,7 +17472,7 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
         schema: {
           type: "object",
           additionalProperties: false,
-          required: ["count", "outDir", "files", "slots"],
+          required: ["count", "outDir", "files", "slots", "suppressed", "suppressedCount", "suppressedTruncated"],
           properties: {
             count: { type: "integer" },
             outDir: { type: "string" },
@@ -17317,13 +17491,28 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
                   bounds: { type: "array", items: { type: "integer" } }
                 }
               }
-            }
+            },
+            suppressed: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["name", "leafId"],
+                properties: {
+                  name: { type: "string" },
+                  leafId: { type: "string" }
+                }
+              }
+            },
+            suppressedCount: { type: "integer" },
+            suppressedTruncated: { type: "boolean" }
           }
         },
         render: (_args, value) => [
           {
             type: "text",
-            text: `Rendered ${value.count} image(s) into ${value.outDir} using ${value.slots.map((slot) => slot.name).join(", ")}${value.zip ? `
+            text: `Rendered ${value.count} image(s) into ${value.outDir} using ${value.slots.map((slot) => slot.name).join(", ")}${value.suppressed && value.suppressed.length ? `
+Suppressed overlapping slot siblings (hidden with the slot): ${value.suppressed.map((layer) => layer.name).join(", ")}${value.suppressedTruncated ? ` (+${value.suppressedCount - value.suppressed.length} more)` : ""}` : ""}${value.zip ? `
 ZIP: ${value.zip}` : ""}`
           }
         ]
