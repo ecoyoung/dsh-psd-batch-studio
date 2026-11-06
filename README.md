@@ -156,10 +156,11 @@ plugin_manager install_bundle, target = /绝对路径/dsh-psd-batch-studio
 ```
 
 - `layer` 写图层名或 leaf id；`value` 换文案（每个字继承原来的样式，最常用的「换价格」零配置）；
-  `runs` 按段改字体/字重/字号/颜色/字距，`size` 用 pt，与 `psd_inspect` 返回的逐段样式一一对应；
+  `runs` 从第一个字起按 `len` 依次改字体/字重/字号/颜色/字距，没写的属性和没覆盖到的字沿用原样式，
+  `size` 用 pt，与 `psd_inspect` 返回的逐段样式一一对应；
   平铺的 `font`/`weight`/`size`/`color` 则作用于整层。
 - `textBySku` 按 SKU 文件名（带不带扩展名都行）给每个 SKU 单独的文字，同层覆盖 `text`；
-  不同文字组合会各自合成一个场景并缓存，价格各不相同的极端场景会相应变慢。
+  相同文字组合的 SKU 归为一组共用一个场景，组渲染完立即释放画布，价格各不相同时内存不随 SKU 数增长，只是会慢一些。
 - `fontDir` 注册 ttf/otf/ttc 字体（注册名 = 文件名主干），注册清单回显在 `fontsRegistered`；
   找不到的字体仍然会画（用回退字体），并在 `textWarnings` 里点名。
 - 面板工作台的「文字替换」区可以改同样的内容：文案输入框回车生效，`{}` 按钮编辑样式段 JSON

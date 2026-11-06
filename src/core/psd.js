@@ -516,16 +516,20 @@ export function buildScene(doc) {
     if (!doc.slots.has(leaf.id) || claimed.has(leaf.id)) continue
     claimed.add(leaf.id)
     let rect = leafBounds(leaf)
+    // A copy that widens the fit rect is product art too: it must join the
+    // cluster so the draw pass skips it, or it paints over the SKU.
+    const members = new Set([leaf.id])
     for (const other of visibleLeaves) {
       if (claimed.has(other.id) || doc.slots.has(other.id)) continue
       if (!isStackedCopy(leaf, other, doc)) continue
       claimed.add(other.id)
+      members.add(other.id)
       rect = unionBounds(rect, leafBounds(other))
     }
     const cluster = {
       id: leaf.id,
       name: leaf.name,
-      members: new Set([leaf.id]),
+      members,
       rect: {
         x: rect.left,
         y: rect.top,

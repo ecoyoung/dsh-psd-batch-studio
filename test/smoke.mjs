@@ -14,7 +14,7 @@ import { writePsd } from 'ag-psd'
 
 import { parseTemplate, buildScene, suggestSlots } from '../src/core/psd.js'
 import { inspectTemplate, renderBatch } from '../src/server.js'
-import { mergeOverrideLists } from '../src/core/text.js'
+import { mergeOverrideLists, mergeTextOverride } from '../src/core/text.js'
 
 // Importing src/server.js installs the ag-psd/@napi-rs canvas factory.
 
@@ -252,6 +252,27 @@ async function main() {
     const staleRemainder = outputCtx.getImageData(570, 400, 1, 1).data
     assert.ok(Math.abs(staleRemainder[0] - 204) < 10, '旧图 pixels outside the slot are suppressed')
 
+    // --- regression: a stacked copy above the slot never covers the SKU ----
+    // 产品位阴影 (#000088) sits above 产品位 and widens the fit rect; it is
+    // product art and must be hidden with the slot, not drawn over the SKU.
+    const copyRender = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png'],
+      outDir: 'out-copy',
+      format: 'png',
+    })
+    const copyCanvas = createCanvas(800, 800)
+    const copyCtx = copyCanvas.getContext('2d')
+    copyCtx.drawImage(await loadImageFrom(path.join(cwd, 'out-copy', copyRender.files[0])), 0, 0)
+    for (const [x, y] of [[400, 420], [300, 300], [500, 580]]) {
+      const pixel = copyCtx.getImageData(x, y, 1, 1).data
+      assert.ok(
+        pixel[0] > 200 && pixel[1] < 60 && pixel[2] < 60,
+        `SKU red at (${x},${y}), not the stacked copy (got ${pixel[0]},${pixel[1]},${pixel[2]})`,
+      )
+    }
+
     // --- regression: slot part stays at the slot layer's stack position ---
     const zDoc = await parseFixture(cwd, 'zorder.psd')
     const slotLeaf = zDoc.leaves.find((leaf) => leaf.name === '槽位')
@@ -399,6 +420,66 @@ async function main() {
         'registered font resolves without fallback warning',
       )
     }
+
+    // --- regression: runs keep their requested lengths ---------------------
+    const priceBase = (await parseFixture(cwd, 'fixture.psd')).entries.find((entry) => entry.name === '价格').text
+    const split = mergeTextOverride(priceBase, {
+      value: '8888',
+      runs: [{ len: 1, color: '#ff0000' }, { len: 3, color: '#0000ff' }],
+    })
+    assert.deepEqual(split.runs.map((run) => run.len), [1, 3], 'runs keep the requested [1, 3] split')
+    assert.deepEqual(split.runs.map((run) => run.color), [[255, 0, 0], [0, 0, 255]])
+    // A segment restyles only its own characters; the rest keep their style.
+    const partial = mergeTextOverride(priceBase, { runs: [{ len: 1, color: '#00ff00' }] })
+    assert.deepEqual(partial.runs[0], { ...priceBase.runs[0], len: 1, color: [0, 255, 0] })
+    assert.equal(partial.runs.reduce((sum, run) => sum + run.len, 0), priceBase.value.length)
+    assert.deepEqual(partial.runs[partial.runs.length - 1].size, 28, 'tail keeps its 28pt style')
+
+    const twoTone = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png'],
+      outDir: 'out-two-tone',
+      format: 'png',
+      text: [{ layer: '价格', value: '8888', runs: [{ len: 1, color: '#ff0000' }, { len: 3, color: '#0000ff' }] }],
+    })
+    const toneCanvas = createCanvas(800, 800)
+    const toneCtx = toneCanvas.getContext('2d')
+    toneCtx.drawImage(await loadImageFrom(path.join(cwd, 'out-two-tone', twoTone.files[0])), 0, 0)
+    // Stay left of the red CMYK价 raster at x 420.
+    const tone = toneCtx.getImageData(0, 660, 400, 140).data
+    let red = 0
+    let blue = 0
+    for (let index = 0; index < tone.length; index += 4) {
+      const [r, g, b] = [tone[index], tone[index + 1], tone[index + 2]]
+      if (r > 200 && g < 60 && b < 60) red += 1
+      if (b > 200 && r < 60 && g < 60) blue += 1
+    }
+    assert.ok(red > 30, `first glyph renders red (${red} px)`)
+    assert.ok(blue > red, `last three glyphs render blue (${blue} px vs ${red} red)`)
+
+    // --- per-SKU groups: interleaved prices keep input order, one scene each
+    await fs.writeFile(path.join(cwd, 'sku-c.png'), await skuB.encode('png'))
+    const grouped = await renderBatch({
+      cwd,
+      template: 'fixture.psd',
+      skus: ['sku.png', 'sku-b.png', 'sku-c.png'],
+      outDir: 'out-grouped',
+      format: 'png',
+      zip: true,
+      textBySku: {
+        'sku.png': [{ layer: '价格', value: '¥11.00' }],
+        'sku-b.png': [{ layer: '价格', value: '¥22.00' }],
+        'sku-c.png': [{ layer: '价格', value: '¥11.00' }],
+      },
+    })
+    assert.equal(grouped.textVariants, 2, 'SKUs sharing a price share one scene')
+    assert.deepEqual(grouped.files, ['sku.png', 'sku-b.png', 'sku-c.png'], 'output keeps input order')
+    const [groupA, groupC] = await Promise.all(
+      ['sku.png', 'sku-c.png'].map((name) => fs.readFile(path.join(cwd, 'out-grouped', name))),
+    )
+    assert.ok(!groupA.equals(groupC), 'different SKU images still differ inside one text group')
+    assert.ok(grouped.zip, 'zip written for grouped batch')
 
     // --- override list merge: per-SKU wins per layer ------------------------
     const merged = mergeOverrideLists([{ layer: 'a', value: '1' }, { layer: 'b', value: '2' }], [

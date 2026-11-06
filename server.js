@@ -16571,27 +16571,25 @@ function mergeTextOverride(base, override = {}) {
     runs = [{ len: value.length, ...only || { family: null, weight: 400, size: 24, color: [0, 0, 0], tracking: 0 } }];
   }
   if (Array.isArray(override.runs) && override.runs.length) {
-    const first = runs[0];
-    const segments = [];
+    const chars = charStyles(runs, value).map(({ len: _len, ...style }) => style);
+    let offset = 0;
     for (const row of override.runs) {
       const len = Math.max(0, Math.round(Number(row.len) || 0));
-      if (!len) continue;
-      const style = { ...first || {} };
-      if (row.family != null) style.family = String(row.family);
-      if (row.weight != null) style.weight = Number(row.weight);
-      if (row.size != null) style.size = Number(row.size);
-      if (row.tracking != null) style.tracking = Number(row.tracking);
+      if (!len || offset >= chars.length) continue;
+      const patch2 = {};
+      if (row.family != null) patch2.family = String(row.family);
+      if (row.weight != null) patch2.weight = Number(row.weight);
+      if (row.size != null) patch2.size = Number(row.size);
+      if (row.tracking != null) patch2.tracking = Number(row.tracking);
       if (row.color != null) {
         const parsed = parseColor(row.color);
-        if (parsed) style.color = parsed;
+        if (parsed) patch2.color = parsed;
       }
-      segments.push({ len, ...style });
+      const end = Math.min(chars.length, offset + len);
+      for (let index = offset; index < end; index += 1) chars[index] = { ...chars[index], ...patch2 };
+      offset = end;
     }
-    let total = segments.reduce((sum, segment) => sum + segment.len, 0);
-    if (segments.length && total < value.length) {
-      segments.push({ len: value.length - total, ...segments[segments.length - 1] });
-    }
-    if (segments.length) runs = segments;
+    if (chars.length) runs = compressRuns(chars);
   }
   const patch = {};
   if (override.font != null) patch.family = String(override.font);
@@ -17193,16 +17191,18 @@ function buildScene(doc) {
     if (!doc.slots.has(leaf.id) || claimed.has(leaf.id)) continue;
     claimed.add(leaf.id);
     let rect = leafBounds(leaf);
+    const members = /* @__PURE__ */ new Set([leaf.id]);
     for (const other of visibleLeaves) {
       if (claimed.has(other.id) || doc.slots.has(other.id)) continue;
       if (!isStackedCopy(leaf, other, doc)) continue;
       claimed.add(other.id);
+      members.add(other.id);
       rect = unionBounds(rect, leafBounds(other));
     }
     const cluster = {
       id: leaf.id,
       name: leaf.name,
-      members: /* @__PURE__ */ new Set([leaf.id]),
+      members,
       rect: {
         x: rect.left,
         y: rect.top,
@@ -17260,6 +17260,15 @@ function buildScene(doc) {
     width: doc.width,
     height: doc.height
   };
+}
+function disposeScene(scene) {
+  if (!scene) return;
+  for (const part of scene.parts) {
+    if (part.kind === "layers" && part.canvas) {
+      part.canvas.width = 1;
+      part.canvas.height = 1;
+    }
+  }
 }
 
 // src/core/fit.js
@@ -17604,61 +17613,71 @@ async function renderBatch({
     fontsRegistered = [...new Set(registration.registered)];
     fontsSkipped = registration.skipped;
   }
-  const variantCache = /* @__PURE__ */ new Map();
   const textWarnings = [];
-  const sceneFor = (file) => {
+  const groups = /* @__PURE__ */ new Map();
+  const used = /* @__PURE__ */ new Set();
+  const extensionFor = format === "png" ? "png" : "jpg";
+  const jobs = skuFiles.map((file, index) => {
     const base = path.basename(file, path.extname(file));
     const overrides = mergeOverrideLists(
       text,
       textBySku ? textBySku[path.basename(file)] ?? textBySku[base] : void 0
     );
-    if (!overrides) return { scene: doc.scene, warnings: [] };
-    const signature = JSON.stringify(overrides);
-    let variant = variantCache.get(signature);
-    if (!variant) {
-      const clone = cloneDoc(doc);
-      const warnings = applyTextOverrides(clone, overrides, (family) => GlobalFonts.has(family));
-      clone.scene = buildScene(clone);
-      variant = { scene: clone.scene, warnings };
-      variantCache.set(signature, variant);
+    const signature = overrides ? JSON.stringify(overrides) : "";
+    let group = groups.get(signature);
+    if (!group) {
+      group = { overrides, jobs: [] };
+      groups.set(signature, group);
     }
-    return variant;
-  };
+    const job = { index, file, base, name: uniqueName(used, sanitizeName(base), extensionFor) };
+    group.jobs.push(job);
+    return job;
+  });
+  const textVariants = [...groups.values()].filter((group) => group.overrides).length;
   const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const relativeOut = outDir || path.join("out", "psd-batch", `${sanitizeName(doc.name)}-${stamp}`);
   const absoluteOut = await resolveInWorkspace(cwd, relativeOut, { mustExist: false });
   await fs.mkdir(absoluteOut, { recursive: true });
   const isPng = format === "png";
   const mime = isPng ? "image/png" : "image/jpeg";
-  const extension = isPng ? "png" : "jpg";
   const settings = {
     mode: fit || DEFAULT_SETTINGS.mode,
     anchor: anchor || DEFAULT_SETTINGS.anchor,
     fill: Number.isFinite(Number(fill)) ? Number(fill) : DEFAULT_SETTINGS.fill
   };
-  const used = /* @__PURE__ */ new Set();
-  const files = [];
-  const zipEntries = {};
-  for (const file of skuFiles) {
-    const image = await loadImage(file);
-    const content = measureContent(image);
-    const base = path.basename(file, path.extname(file));
-    const adjust = toAdjustment(adjustments[path.basename(file)] ?? adjustments[base]);
-    const variant = sceneFor(file);
-    textWarnings.push(...variant.warnings);
-    const canvas = createCanvas2(doc.width, doc.height);
-    const ctx = canvas.getContext("2d");
-    if (!isPng) {
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, doc.width, doc.height);
+  const zipBuffers = zip ? new Array(jobs.length) : null;
+  for (const group of groups.values()) {
+    let scene = doc.scene;
+    if (group.overrides) {
+      const clone = cloneDoc(doc);
+      textWarnings.push(...applyTextOverrides(clone, group.overrides, (family) => GlobalFonts.has(family)));
+      scene = buildScene(clone);
     }
-    drawScene(ctx, variant.scene, image, content, settings, adjust);
-    const buffer = canvas.toBuffer(mime, isPng ? void 0 : Math.round(quality));
-    const name = uniqueName(used, sanitizeName(base), extension);
-    await fs.writeFile(path.join(absoluteOut, name), buffer);
-    files.push(name);
-    if (zip) zipEntries[name] = new Uint8Array(buffer);
+    try {
+      for (const job of group.jobs) {
+        const image = await loadImage(job.file);
+        const content = measureContent(image);
+        const adjust = toAdjustment(adjustments[path.basename(job.file)] ?? adjustments[job.base]);
+        const canvas = createCanvas2(doc.width, doc.height);
+        const ctx = canvas.getContext("2d");
+        if (!isPng) {
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, doc.width, doc.height);
+        }
+        drawScene(ctx, scene, image, content, settings, adjust);
+        const buffer = canvas.toBuffer(mime, isPng ? void 0 : Math.round(quality));
+        await fs.writeFile(path.join(absoluteOut, job.name), buffer);
+        if (zipBuffers) zipBuffers[job.index] = new Uint8Array(buffer);
+      }
+    } finally {
+      if (scene !== doc.scene) disposeScene(scene);
+    }
   }
+  const files = jobs.map((job) => job.name);
+  const zipEntries = {};
+  if (zipBuffers) jobs.forEach((job) => {
+    zipEntries[job.name] = zipBuffers[job.index];
+  });
   let zipPath;
   if (zip) {
     const data = zipSync(zipEntries, { level: 0 });
@@ -17678,7 +17697,7 @@ async function renderBatch({
     suppressed: doc.scene.suppressed.slice(0, 50),
     suppressedCount: doc.scene.suppressed.length,
     suppressedTruncated: doc.scene.suppressed.length > 50,
-    textVariants: variantCache.size,
+    textVariants,
     ...fontsRegistered ? { fontsRegistered } : {},
     ...fontsSkipped && fontsSkipped.length ? { fontsSkipped } : {},
     ...textWarnings.length ? { textWarnings: [...new Set(textWarnings)] } : {},

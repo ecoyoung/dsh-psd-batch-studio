@@ -207,12 +207,14 @@ re-render them with real glyphs from the PSD's style runs:
 
 - `layer` takes a layer name or leaf id. `value` rewrites the copy — every
   character keeps its original style, so the common "swap the price" case needs
-  nothing else. `runs` restyle exact segments (family/weight/size/color/
-  tracking); `size` is in pt, matching the per-run styles `psd_inspect` reports.
+  nothing else. `runs` restyle consecutive segments from the first character,
+  each exactly `len` long (family/weight/size/color/tracking); fields and
+  characters a run does not cover keep their style. `size` is in pt, matching the per-run styles `psd_inspect` reports.
   Flat `font`/`weight`/`size`/`color` apply to the whole layer.
 - `textBySku` is keyed by SKU file name (with or without extension) and wins
-  over `text` per layer — give every SKU its own price. Distinct override sets
-  each produce a cached scene, so all-distinct prices are the slow path.
+  over `text` per layer — give every SKU its own price. SKUs sharing an
+  override set render as one group on one scene, which is freed before the
+  next group, so all-distinct prices are slower but memory stays flat.
 - `fontDir` registers .ttf/.otf/.ttc files (family = file stem) and echoes them
   in `fontsRegistered`; unresolvable fonts still render (canvas fallback) and
   are named in `textWarnings`.

@@ -259,27 +259,28 @@ export function mergeTextOverride(base, override = {}) {
   }
 
   if (Array.isArray(override.runs) && override.runs.length) {
-    const first = runs[0]
-    const segments = []
+    // Expand the inherited styles per character first, then restyle each
+    // requested segment in place. The requested `len` always wins: spreading
+    // an inherited run after it would put the run's own length back.
+    const chars = charStyles(runs, value).map(({ len: _len, ...style }) => style)
+    let offset = 0
     for (const row of override.runs) {
       const len = Math.max(0, Math.round(Number(row.len) || 0))
-      if (!len) continue
-      const style = { ...(first || {}) }
-      if (row.family != null) style.family = String(row.family)
-      if (row.weight != null) style.weight = Number(row.weight)
-      if (row.size != null) style.size = Number(row.size)
-      if (row.tracking != null) style.tracking = Number(row.tracking)
+      if (!len || offset >= chars.length) continue
+      const patch = {}
+      if (row.family != null) patch.family = String(row.family)
+      if (row.weight != null) patch.weight = Number(row.weight)
+      if (row.size != null) patch.size = Number(row.size)
+      if (row.tracking != null) patch.tracking = Number(row.tracking)
       if (row.color != null) {
         const parsed = parseColor(row.color)
-        if (parsed) style.color = parsed
+        if (parsed) patch.color = parsed
       }
-      segments.push({ len, ...style })
+      const end = Math.min(chars.length, offset + len)
+      for (let index = offset; index < end; index += 1) chars[index] = { ...chars[index], ...patch }
+      offset = end
     }
-    let total = segments.reduce((sum, segment) => sum + segment.len, 0)
-    if (segments.length && total < value.length) {
-      segments.push({ len: value.length - total, ...segments[segments.length - 1] })
-    }
-    if (segments.length) runs = segments
+    if (chars.length) runs = compressRuns(chars)
   }
 
   const patch = {}
