@@ -164,7 +164,10 @@ export async function inspectTemplate({ cwd, template }) {
       if (entry.text) {
         layer.textContent = entry.text.value
         layer.runCount = entry.text.runs.length
-        if (entry.text.runs.length) layer.runs = entry.text.runs.slice(0, 8)
+        if (entry.text.runs.length) {
+          layer.runs = entry.text.runs.slice(0, 8)
+          layer.runsTruncated = entry.text.runs.length > 8
+        }
       }
       if (entry.bounds) layer.bounds = entry.bounds
       return layer
@@ -275,6 +278,8 @@ export async function renderBatch({
       bounds: [slot.rect.x, slot.rect.y, slot.rect.x + slot.rect.w, slot.rect.y + slot.rect.h],
     })),
     suppressed: doc.scene.suppressed.slice(0, 50),
+    suppressedCount: doc.scene.suppressed.length,
+    suppressedTruncated: doc.scene.suppressed.length > 50,
     ...(zipPath ? { zip: path.relative(cwd, zipPath) } : {}),
   }
 }
@@ -346,6 +351,7 @@ export function registerTools(ctx) {
                     },
                   },
                   runCount: { type: 'integer' },
+                  runsTruncated: { type: 'boolean' },
                 },
               },
             },
@@ -442,7 +448,7 @@ export function registerTools(ctx) {
         schema: {
           type: 'object',
           additionalProperties: false,
-          required: ['count', 'outDir', 'files', 'slots', 'suppressed'],
+          required: ['count', 'outDir', 'files', 'slots', 'suppressed', 'suppressedCount', 'suppressedTruncated'],
           properties: {
             count: { type: 'integer' },
             outDir: { type: 'string' },
@@ -474,6 +480,8 @@ export function registerTools(ctx) {
                 },
               },
             },
+            suppressedCount: { type: 'integer' },
+            suppressedTruncated: { type: 'boolean' },
           },
         },
         render: (_args, value) => [
@@ -485,7 +493,9 @@ export function registerTools(ctx) {
               value.suppressed && value.suppressed.length
                 ? `\nSuppressed overlapping slot siblings (hidden with the slot): ${value.suppressed
                     .map((layer) => layer.name)
-                    .join(', ')}`
+                    .join(', ')}${
+                    value.suppressedTruncated ? ` (+${value.suppressedCount - value.suppressed.length} more)` : ''
+                  }`
                 : ''
             }${value.zip ? `\nZIP: ${value.zip}` : ''}`,
           },
