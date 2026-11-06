@@ -114,6 +114,19 @@ function toAdjustment(raw) {
   return adjust
 }
 
+/** One line per text layer (first 12), so the agent sees copy before rendering. */
+function describeTextLayers(layers) {
+  const lines = layers
+    .filter((layer) => layer.textContent != null)
+    .slice(0, 12)
+    .map((layer) => {
+      const run = (layer.runs || [])[0]
+      const font = run ? ` ${run.family || '?'} ${run.size}pt` : ''
+      return `  ${layer.name}: ${JSON.stringify(layer.textContent)}${font}`
+    })
+  return lines.length ? `\nText layers:\n${lines.join('\n')}` : ''
+}
+
 async function listSkuFiles(cwd, { skus, skuDir }) {
   const files = []
   if (Array.isArray(skus)) {
@@ -148,6 +161,11 @@ export async function inspectTemplate({ cwd, template }) {
       }
       if (entry.leafId) layer.leafId = entry.leafId
       if (entry.kind === 'text') layer.text = true
+      if (entry.text) {
+        layer.textContent = entry.text.value
+        layer.runCount = entry.text.runs.length
+        if (entry.text.runs.length) layer.runs = entry.text.runs.slice(0, 8)
+      }
       if (entry.bounds) layer.bounds = entry.bounds
       return layer
     })
@@ -256,6 +274,7 @@ export async function renderBatch({
       leafId: slot.leafId,
       bounds: [slot.rect.x, slot.rect.y, slot.rect.x + slot.rect.w, slot.rect.y + slot.rect.h],
     })),
+    suppressed: doc.scene.suppressed.slice(0, 50),
     ...(zipPath ? { zip: path.relative(cwd, zipPath) } : {}),
   }
 }
@@ -273,7 +292,7 @@ export function registerTools(ctx) {
     ctx.tools.register({
       name: 'psd_inspect',
       description:
-        'Inspect a PSD/PSB main-image template inside the session workspace. Returns its size, the layer tree (names, depth, visibility, bounds, ids) and the product slots the studio would auto-detect. Use this before psd_batch_render when you need to choose slot layers.',
+        'Inspect a PSD/PSB main-image template inside the session workspace. Returns its size, the layer tree (names, depth, visibility, bounds, ids), product slots the studio would auto-detect, and — for text layers — the copy plus per-run font styles (family, weight, size, color). Use this before psd_batch_render when you need to choose slot layers or check what a text layer says.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -309,6 +328,24 @@ export function registerTools(ctx) {
                   text: { type: 'boolean' },
                   leafId: { type: 'string' },
                   bounds: { type: 'array', items: { type: 'integer' } },
+                  textContent: { type: 'string' },
+                  runs: {
+                    type: 'array',
+                    items: {
+                      type: 'object',
+                      additionalProperties: false,
+                      required: ['len'],
+                      properties: {
+                        len: { type: 'integer' },
+                        family: { type: ['string', 'null'] },
+                        weight: { type: 'integer' },
+                        size: { type: 'number' },
+                        color: { type: 'array', items: { type: 'integer' } },
+                        tracking: { type: 'number' },
+                      },
+                    },
+                  },
+                  runCount: { type: 'integer' },
                 },
               },
             },
@@ -333,7 +370,7 @@ export function registerTools(ctx) {
             text: `${value.name}: ${value.width}×${value.height}, ${value.layers.length} listed layers.\nAuto slots: ${
               value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.join(',')}]`).join(' | ') ||
               'none'
-            }`,
+            }${describeTextLayers(value.layers)}`,
           },
         ],
       },
@@ -350,7 +387,7 @@ export function registerTools(ctx) {
     ctx.tools.register({
       name: 'psd_batch_render',
       description:
-        'Render a PSD/PSB main-image template with many SKU images at once. Each SKU image is trimmed to its visible content, fitted into the product slots, composited between the template layers, and written as JPG/PNG into a workspace folder. Returns the output folder and file names; optionally packs a ZIP.',
+        'Render a PSD/PSB main-image template with many SKU images at once. Each SKU image is trimmed to its visible content, fitted into the product slots, composited between the template layers, and written as JPG/PNG into a workspace folder. Visible sibling layers that overlap a slot are suppressed together with the slot (reported as `suppressed`) so stale product art cannot show through. Returns the output folder and file names; optionally packs a ZIP.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -405,7 +442,7 @@ export function registerTools(ctx) {
         schema: {
           type: 'object',
           additionalProperties: false,
-          required: ['count', 'outDir', 'files', 'slots'],
+          required: ['count', 'outDir', 'files', 'slots', 'suppressed'],
           properties: {
             count: { type: 'integer' },
             outDir: { type: 'string' },
@@ -425,6 +462,18 @@ export function registerTools(ctx) {
                 },
               },
             },
+            suppressed: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['name', 'leafId'],
+                properties: {
+                  name: { type: 'string' },
+                  leafId: { type: 'string' },
+                },
+              },
+            },
           },
         },
         render: (_args, value) => [
@@ -432,7 +481,13 @@ export function registerTools(ctx) {
             type: 'text',
             text: `Rendered ${value.count} image(s) into ${value.outDir} using ${value.slots
               .map((slot) => slot.name)
-              .join(', ')}${value.zip ? `\nZIP: ${value.zip}` : ''}`,
+              .join(', ')}${
+              value.suppressed && value.suppressed.length
+                ? `\nSuppressed overlapping slot siblings (hidden with the slot): ${value.suppressed
+                    .map((layer) => layer.name)
+                    .join(', ')}`
+                : ''
+            }${value.zip ? `\nZIP: ${value.zip}` : ''}`,
           },
         ],
       },

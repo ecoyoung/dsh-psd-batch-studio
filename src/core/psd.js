@@ -92,6 +92,116 @@ export async function parseTemplate(file, onStage = () => {}) {
   }
 }
 
+/** PSD font names arrive squashed ("PingFangSC-Regular"); map the common ones. */
+const FONT_FAMILY_MAP = [
+  [/^PingFangSC/i, 'PingFang SC'],
+  [/^PingFang/i, 'PingFang SC'],
+  [/^HiraginoSansGB/i, 'Hiragino Sans GB'],
+  [/^MicrosoftYaHei/i, 'Microsoft YaHei'],
+  [/^MicrosoftJhengHei/i, 'Microsoft JhengHei'],
+  [/^(SourceHanSans|SourceHanSansCN|NotoSansSC|NotoSansCJK)/i, 'Noto Sans SC'],
+  [/^SourceHanSerif/i, 'Noto Serif SC'],
+  [/^SimHei|^STHeiti/i, 'Heiti SC'],
+  [/^SimSun|^STSong/i, 'Songti SC'],
+  [/^AlibabaPuHuiTi/i, 'Alibaba PuHuiTi'],
+  [/^OPPOSans/i, 'OPPO Sans'],
+  [/^HarmonyOS/i, 'HarmonyOS Sans'],
+  [/^DIN/i, 'DIN Alternate'],
+  [/^ArialMT|^Arial/i, 'Arial'],
+  [/^HelveticaNeue|^Helvetica/i, 'Helvetica Neue'],
+  [/^Inter/i, 'Inter'],
+  [/^Roboto/i, 'Roboto'],
+]
+
+function fontFamilyOf(name) {
+  const raw = String(name || '')
+  for (const [pattern, family] of FONT_FAMILY_MAP) {
+    if (pattern.test(raw)) return family
+  }
+  return raw.split(/[-_ ]/)[0] || raw || null
+}
+
+function fontWeightOf(name, fauxBold) {
+  const raw = String(name || '').toLowerCase()
+  if (/heavy|black|extrabold|ultrabold/.test(raw)) return 800
+  if (/semibold|demibold|bold/.test(raw)) return 700
+  if (/medium/.test(raw)) return 500
+  if (/light|thin/.test(raw)) return 300
+  return fauxBold ? 700 : 400
+}
+
+function describeTextStyle(raw) {
+  const style = raw || {}
+  const color = style.fillColor || {}
+  return {
+    family: fontFamilyOf(style.font ? style.font.name : ''),
+    weight: fontWeightOf(style.font ? style.font.name : '', style.fauxBold),
+    size: Math.round((style.fontSize || 0) * 100) / 100,
+    color: [
+      Math.round(color.r ?? 0),
+      Math.round(color.g ?? 0),
+      Math.round(color.b ?? 0),
+    ],
+    tracking: style.tracking || 0,
+  }
+}
+
+// styleRuns only carry the fields that differ from the base style, so each run
+// must be merged over it.
+function mergeTextStyle(base, raw) {
+  const style = (raw && raw.style) || {}
+  const has = (key) => style[key] !== undefined && style[key] !== null
+  const merged = { ...base }
+  if (has('font') && style.font && style.font.name) {
+    merged.family = fontFamilyOf(style.font.name)
+    merged.weight = fontWeightOf(style.font.name, style.fauxBold)
+  } else if (has('fauxBold')) {
+    merged.weight = fontWeightOf(merged.family, style.fauxBold)
+  }
+  if (has('fontSize') && style.fontSize > 0) merged.size = Math.round(style.fontSize * 100) / 100
+  if (has('fillColor') && style.fillColor) {
+    merged.color = [
+      Math.round(style.fillColor.r ?? 0),
+      Math.round(style.fillColor.g ?? 0),
+      Math.round(style.fillColor.b ?? 0),
+    ]
+  }
+  if (has('tracking')) merged.tracking = style.tracking
+  return merged
+}
+
+/**
+ * Summarize a text layer: its content plus one style entry per run, so an
+ * agent can see what a price layer looks like before rendering anything.
+ */
+function describeTextLayer(text) {
+  const style = Array.isArray(text.style) ? text.style[0] : text.style || {}
+  const base = describeTextStyle(style)
+  const value = String(text.text || '').replace(/\r$/, '').replace(/\r/g, '\n')
+  const runs = []
+  for (const run of text.styleRuns || []) {
+    const length = Math.max(0, Math.round(run.length || 0))
+    if (!length) continue
+    runs.push({ len: length, ...mergeTextStyle(base, run) })
+  }
+  let total = runs.reduce((sum, run) => sum + run.len, 0)
+  if (total !== value.length && runs.length) {
+    if (total < value.length) {
+      runs.push({ len: value.length - total, ...base })
+    } else {
+      let left = value.length
+      for (let index = 0; index < runs.length && left > 0; index += 1) {
+        runs[index].len = Math.min(runs[index].len, left)
+        left -= runs[index].len
+      }
+      while (runs.length && runs[runs.length - 1].len <= 0) runs.pop()
+    }
+    total = runs.reduce((sum, run) => sum + run.len, 0)
+  }
+  if (!runs.length && value.length) runs.push({ len: value.length, ...base })
+  return { value, runs }
+}
+
 function buildTree(psd) {
   const entries = []
   const leaves = []
@@ -110,6 +220,7 @@ function buildTree(psd) {
         parentId,
         path: [...ancestorIds, id],
       }
+      if (!isGroup && node.text) entry.text = describeTextLayer(node.text)
       entries.push(entry)
 
       if (isGroup) {
@@ -447,6 +558,16 @@ function leafBounds(leaf) {
   }
 }
 
+/** How much of the smaller bounding box is covered by the other one (0-1). */
+function boundsOverlapRatio(a, b) {
+  const width = Math.min(a.right, b.right) - Math.max(a.left, b.left)
+  const height = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)
+  if (width <= 0 || height <= 0) return 0
+  const areaA = (a.right - a.left) * (a.bottom - a.top)
+  const areaB = (b.right - b.left) * (b.bottom - b.top)
+  return (width * height) / Math.min(areaA, areaB)
+}
+
 function unionBounds(a, b) {
   return {
     left: Math.min(a.left, b.left),
@@ -482,20 +603,29 @@ function isStackedCopy(base, other, doc) {
 }
 
 /**
+ * A visible sibling of a slot covering at least this much of the slot's box is
+ * treated as stale product art and hidden together with the slot.
+ */
+const SLOT_SIBLING_OVERLAP = 0.25
+
+/**
  * Split the visible layer stack into background runs and product slots.
  *
- * @returns {{parts: Array<object>, slots: Array<object>, width: number, height: number}}
+ * @returns {{parts: Array<object>, slots: Array<object>, suppressed: Array<object>, width: number, height: number}}
  */
 export function buildScene(doc) {
   const visibleLeaves = doc.leaves.filter((leaf) => isLeafVisible(doc, leaf))
+  const entryById = new Map(doc.entries.map((entry) => [entry.id, entry]))
   const clusters = []
   const claimed = new Set()
+  const suppressed = []
 
   for (const leaf of visibleLeaves) {
     if (!doc.slots.has(leaf.id) || claimed.has(leaf.id)) continue
     const members = [leaf]
     claimed.add(leaf.id)
-    let rect = leafBounds(leaf)
+    const slotBounds = leafBounds(leaf)
+    let rect = slotBounds
     for (const other of visibleLeaves) {
       if (claimed.has(other.id) || doc.slots.has(other.id)) continue
       if (!isStackedCopy(leaf, other, doc)) continue
@@ -503,6 +633,23 @@ export function buildScene(doc) {
       claimed.add(other.id)
       rect = unionBounds(rect, leafBounds(other))
     }
+
+    // A visible sibling in the same group still carries the old product pixels
+    // and shows through once the SKU replaces the slot. Hide it together with
+    // the slot, but keep the slot rect untouched so the fitting area stays
+    // exactly what the designer drew.
+    const parent = entryById.get(leaf.entryId)?.parentId
+    if (parent) {
+      for (const other of visibleLeaves) {
+        if (claimed.has(other.id) || doc.slots.has(other.id)) continue
+        if (!other.path.includes(parent)) continue
+        if (boundsOverlapRatio(slotBounds, leafBounds(other)) < SLOT_SIBLING_OVERLAP) continue
+        members.push(other)
+        claimed.add(other.id)
+        suppressed.push({ leafId: other.id, name: other.name })
+      }
+    }
+
     clusters.push({
       id: leaf.id,
       name: leaf.name,
@@ -552,6 +699,7 @@ export function buildScene(doc) {
   return {
     parts,
     slots: parts.filter((part) => part.kind === 'slot'),
+    suppressed,
     width: doc.width,
     height: doc.height,
   }
