@@ -97,7 +97,7 @@ out/0715-main/*.jpg  (+ optional ZIP)
 plugin_manager install_bundle, target = dsh-psd-batch-studio
 ```
 
-Pin a version with `dsh-psd-batch-studio@0.2.4` if you need a stable snapshot.
+Pin a version with `dsh-psd-batch-studio@0.2.5` if you need a stable snapshot.
 
 ### From the repository
 
