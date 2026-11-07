@@ -17557,7 +17557,7 @@ async function inspectTemplate({ cwd, template }) {
       layer.textAlign = entry.text.align;
       layer.runCount = entry.text.runs.length;
       if (entry.text.runs.length) {
-        layer.runs = entry.text.runs.slice(0, 8);
+        layer.runs = entry.text.runs.slice(0, 8).map(({ family, ...run }) => family ? { ...run, family } : run);
         layer.runsTruncated = entry.text.runs.length > 8;
       }
     }
@@ -17704,6 +17704,15 @@ async function renderBatch({
     ...zipPath ? { zip: path.relative(cwd, zipPath) } : {}
   };
 }
+async function resolveSessionCwd(ctx, exec) {
+  const service = ctx.reflect?.get?.("workingDirectory");
+  if (service && typeof service.ensure === "function") {
+    return service.ensure(exec.agent, exec.signal);
+  }
+  const cwd = exec.agent?.session?.header?.cwd;
+  if (typeof cwd === "string" && cwd.length > 0) return cwd;
+  throw new Error("This session has no workspace directory; open a workspace and try again");
+}
 function registerTools(ctx) {
   const disposers = [];
   disposers.push(
@@ -17755,7 +17764,9 @@ function registerTools(ctx) {
                       required: ["len"],
                       properties: {
                         len: { type: "integer" },
-                        family: { type: ["string", "null"] },
+                        // dsh only accepts one type per schema node; a run
+                        // without a font name simply omits `family`.
+                        family: { type: "string" },
                         weight: { type: "integer" },
                         size: { type: "number" },
                         color: { type: "array", items: { type: "integer" } },
@@ -17793,7 +17804,7 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
       },
       async execute(args, exec) {
         if (!exec.agent) throw new Error("psd_inspect requires an agent session");
-        const cwd = await ctx.workingDirectory.ensure(exec.agent, exec.signal);
+        const cwd = await resolveSessionCwd(ctx, exec);
         return inspectTemplate({ cwd, template: args.template });
       },
       isConcurrencySafe: () => false
@@ -17984,7 +17995,7 @@ ZIP: ${value.zip}` : ""}`
       },
       async execute(args, exec) {
         if (!exec.agent) throw new Error("psd_batch_render requires an agent session");
-        const cwd = await ctx.workingDirectory.ensure(exec.agent, exec.signal);
+        const cwd = await resolveSessionCwd(ctx, exec);
         return renderBatch({
           cwd,
           template: args.template,
