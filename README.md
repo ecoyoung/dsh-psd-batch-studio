@@ -62,7 +62,7 @@ out/0715-main/*.jpg（可选 ZIP）
 
 - DeepSeek Harness（带插件管理器），dsh `0.2.0-rc.2` 及以上（`dsh.engines.dsh >= 0.2.0-rc.2`）。
   - 桌面版 0.2.0-rc.2（内置 dsh 0.2.0-rc.2、pnpm 11.7.0）实机验证：从 GitHub 安装、冷启动激活、
-    面板渲染、两个 agent 工具注册，并在真实 PSD 上跑通。
+    面板渲染、三个 agent 工具（`psd_inspect`、`psd_batch_render`、`psd_edit`）注册，并在真实 PSD 上跑通。
   - dsh `0.2.1-rc.5` 和 `0.2.2-rc.1`：用对应版本的 `@deepseek-ai/dsh-tools` 校验工具注册和 schema。
     这两个版本提供 `workingDirectory` 服务，工具优先用它定位会话工作区；0.2.0 没有这个服务，
     改用会话自身的工作目录。

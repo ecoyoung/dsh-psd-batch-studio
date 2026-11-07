@@ -96,7 +96,8 @@ out/0715-main/*.jpg  (+ optional ZIP)
   (`dsh.engines.dsh >= 0.2.0-rc.2`).
   - Verified end to end on the desktop app 0.2.0-rc.2 (bundled dsh 0.2.0-rc.2,
     pnpm 11.7.0): GitHub install, cold-start activation, the workbench panel,
-    both agent tools registered, and a real PSD batch.
+    all three agent tools (`psd_inspect`, `psd_batch_render`, `psd_edit`)
+    registered, and a real PSD batch.
   - dsh `0.2.1-rc.5` and `0.2.2-rc.1`: tool registration and schemas checked
     with the matching `@deepseek-ai/dsh-tools`. These releases provide the
     `workingDirectory` service, which the tools prefer for the session
