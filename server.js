@@ -8054,12 +8054,12 @@ var require_imageResources = __commonJS({
         }
       },
       function(writer, target) {
-        var list = target.urlsList;
-        (0, psdWriter_1.writeUint32)(writer, list.length);
-        for (var i = 0; i < list.length; i++) {
+        var list2 = target.urlsList;
+        (0, psdWriter_1.writeUint32)(writer, list2.length);
+        for (var i = 0; i < list2.length; i++) {
           (0, psdWriter_1.writeSignature)(writer, "slic");
-          (0, psdWriter_1.writeUint32)(writer, list[i].id);
-          (0, psdWriter_1.writeUnicodeString)(writer, list[i].url);
+          (0, psdWriter_1.writeUint32)(writer, list2[i].id);
+          (0, psdWriter_1.writeUnicodeString)(writer, list2[i].url);
         }
       }
     );
@@ -16797,8 +16797,8 @@ function restoreTextLeaf(leaf) {
 }
 function applyTextOverrides(doc, overrides, hasFont) {
   const warnings = [];
-  const list = Array.isArray(overrides) ? overrides : [];
-  for (const override of list) {
+  const list2 = Array.isArray(overrides) ? overrides : [];
+  for (const override of list2) {
     const target = String(override.layer ?? "");
     const entry = doc.entries.find(
       (item) => item.id === target || item.leafId === target || item.name === target
@@ -17654,9 +17654,9 @@ async function loadTemplateDoc(absolutePath) {
   attachEditState(doc, absolutePath);
   return doc;
 }
-function canonicalOverrides(doc, list) {
-  if (!Array.isArray(list) || list.length === 0) return list;
-  return list.map((override) => {
+function canonicalOverrides(doc, list2) {
+  if (!Array.isArray(list2) || list2.length === 0) return list2;
+  return list2.map((override) => {
     const target = String(override.layer ?? "");
     const entry = doc.entries.find((item) => item.id === target || item.leafId === target) || doc.entries.find((item) => item.name === target && item.text) || doc.entries.find((item) => item.name === target);
     return entry ? { ...override, layer: entry.id } : override;
@@ -17751,7 +17751,7 @@ async function inspectTemplate({ cwd, template }) {
       layer.textAlign = entry.text.align;
       layer.runCount = entry.text.runs.length;
       if (entry.text.runs.length) {
-        layer.runs = entry.text.runs.slice(0, 8);
+        layer.runs = entry.text.runs.slice(0, 8).map(({ family, ...run }) => family ? { ...run, family } : run);
         layer.runsTruncated = entry.text.runs.length > 8;
       }
     }
@@ -17767,6 +17767,37 @@ async function inspectTemplate({ cwd, template }) {
     truncated: doc.entries.length > layerLimit,
     suggestedSlots: slotSummary(doc, suggestedIds)
   };
+}
+function schemaViolations(schema, value, at, out = []) {
+  const { type } = schema;
+  const matches = type === "array" ? Array.isArray(value) : type === "object" ? value !== null && typeof value === "object" && !Array.isArray(value) : type === "integer" ? Number.isInteger(value) : type === "number" ? typeof value === "number" && Number.isFinite(value) : typeof value === type;
+  if (!matches) {
+    out.push(`${at} must be ${type === "integer" ? "an integer" : `a${type === "object" || type === "array" ? "n" : ""} ${type}`}`);
+    return out;
+  }
+  if (schema.enum && !schema.enum.includes(value)) out.push(`${at} must be one of ${schema.enum.join(", ")}`);
+  if (type === "array" && schema.items) value.forEach((item, index) => schemaViolations(schema.items, item, `${at}[${index}]`, out));
+  if (type === "object") {
+    for (const key of schema.required || []) if (value[key] === void 0) out.push(`${at}.${key} is required`);
+    for (const [key, item] of Object.entries(value)) {
+      const sub = schema.properties && schema.properties[key];
+      if (sub) schemaViolations(sub, item, `${at}.${key}`, out);
+      else if (schema.additionalProperties === false) out.push(`${at}.${key} is not a known field`);
+    }
+  }
+  return out;
+}
+function assertTextBySku(textBySku) {
+  if (textBySku == null) return;
+  const problems = schemaViolations({ type: "object" }, textBySku, "textBySku");
+  if (!problems.length) {
+    for (const [sku, list2] of Object.entries(textBySku)) {
+      schemaViolations({ type: "array", items: TEXT_OVERRIDE_SCHEMA }, list2, `textBySku[${JSON.stringify(sku)}]`, problems);
+    }
+  }
+  if (problems.length) {
+    throw new Error(`Invalid textBySku: ${problems.slice(0, 5).join("; ")}${problems.length > 5 ? ` (+${problems.length - 5} more)` : ""}`);
+  }
 }
 async function renderBatch({
   cwd,
@@ -17786,6 +17817,7 @@ async function renderBatch({
   fontDir,
   zip = false
 }) {
+  assertTextBySku(textBySku);
   const absolute = await resolveInWorkspace(cwd, template);
   const doc = await loadTemplateDoc(absolute);
   const slotIds = slots && slots.length > 0 ? resolveSlots(doc, slots) : doc.pinnedSlots && doc.pinnedSlots.size ? [...doc.pinnedSlots] : suggestSlots(doc);
@@ -18195,6 +18227,50 @@ var TEXT_OVERRIDE_SCHEMA = {
     dy: { type: "number", description: "Vertical nudge in canvas pixels." }
   }
 };
+async function resolveSessionCwd(ctx, exec) {
+  const service = ctx.reflect?.get?.("workingDirectory");
+  if (service && typeof service.ensure === "function") {
+    return service.ensure(exec.agent, exec.signal);
+  }
+  const cwd = exec.agent?.session?.header?.cwd;
+  if (typeof cwd === "string" && cwd.length > 0) return cwd;
+  throw new Error("This session has no workspace directory; open a workspace and try again");
+}
+var list = (items) => items && items.length ? items.join(", ") : "none";
+function describeEditResult(action, value) {
+  let summary;
+  switch (action) {
+    case "status":
+      summary = `${value.textEdits.length} text edit(s); elements: ${list(value.elements)}; slots${value.slotsPinned ? " (from project)" : ""}: ${list(value.slots)}; missing fonts: ${list(value.missingFonts)}${value.editsDropped ? `; edits dropped: ${value.editsDropped}` : ""}`;
+      break;
+    case "text":
+      summary = `${value.layer} (${value.entryId}) \u2192 ${JSON.stringify(value.value)} in ${value.runs.length} run(s)${value.warning ? `. Warning: ${value.warning}` : ""}`;
+      break;
+    case "element":
+      summary = `placed ${list(value.placed.map((item) => `${item.name} at ${item.left},${item.top} (${item.w}\xD7${item.h})`))}; ${value.total} element(s) total`;
+      break;
+    case "remelement":
+      summary = `removed ${value.removed}; remaining: ${list(value.names)}`;
+      break;
+    case "fonts":
+      summary = `registered ${list(value.loaded)}; skipped: ${list(value.skipped)}; still missing: ${list(value.missingFonts)}`;
+      break;
+    case "save_project":
+      summary = `saved ${value.project}: ${value.textEdits} text edit(s), ${value.elements} element(s), slots ${list(value.slots)}`;
+      break;
+    case "load_project":
+      summary = `loaded ${value.project}: ${value.textEdits} text edit(s), ${value.elements} element(s), slots ${list(value.slots)}; missing fonts: ${list(value.missingFonts)}`;
+      break;
+    case "reset":
+      summary = "all text edits, elements and project slots cleared";
+      break;
+    default:
+      summary = "done";
+  }
+  const json = JSON.stringify(value);
+  return `psd_edit ${action}: ${summary}
+${json.length > 4e3 ? `${json.slice(0, 4e3)}\u2026` : json}`;
+}
 function registerTools(ctx) {
   const disposers = [];
   disposers.push(
@@ -18246,7 +18322,9 @@ function registerTools(ctx) {
                       required: ["len"],
                       properties: {
                         len: { type: "integer" },
-                        family: { type: ["string", "null"] },
+                        // dsh only accepts one type per schema node; a run
+                        // without a font name simply omits `family`.
+                        family: { type: "string" },
                         weight: { type: "integer" },
                         size: { type: "number" },
                         color: { type: "array", items: { type: "integer" } },
@@ -18284,7 +18362,7 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
       },
       async execute(args, exec) {
         if (!exec.agent) throw new Error("psd_inspect requires an agent session");
-        const cwd = await ctx.workingDirectory.ensure(exec.agent, exec.signal);
+        const cwd = await resolveSessionCwd(ctx, exec);
         return inspectTemplate({ cwd, template: args.template });
       },
       isConcurrencySafe: () => false
@@ -18324,8 +18402,10 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
           },
           textBySku: {
             type: "object",
-            additionalProperties: { type: "array", items: TEXT_OVERRIDE_SCHEMA },
-            description: "Per-SKU text overrides keyed by SKU file name (with or without extension), same shape as `text`; entries win over `text` per layer. Use it to give every SKU its own price."
+            // dsh only accepts a boolean here, so the per-SKU list shape is
+            // checked at call time against TEXT_OVERRIDE_SCHEMA instead.
+            additionalProperties: true,
+            description: 'Per-SKU text overrides: {"<SKU file name, with or without extension>": [<item>, ...]}, where each item has exactly the shape of a `text` item ({layer, value?, runs?, font?, weight?, size?, sizePx?, color?, tracking?, align?, leading?, dx?, dy?}). Entries win over `text` and psd_edit text edits per layer. Use it to give every SKU its own price.'
           },
           fontDir: {
             type: "string",
@@ -18414,7 +18494,7 @@ ZIP: ${value.zip}` : ""}`
       },
       async execute(args, exec) {
         if (!exec.agent) throw new Error("psd_batch_render requires an agent session");
-        const cwd = await ctx.workingDirectory.ensure(exec.agent, exec.signal);
+        const cwd = await resolveSessionCwd(ctx, exec);
         return renderBatch({
           cwd,
           template: args.template,
@@ -18508,11 +18588,13 @@ ZIP: ${value.zip}` : ""}`
         schema: {
           type: "object",
           additionalProperties: true
-        }
+        },
+        // dsh requires `render`: it is what the model reads back.
+        render: (args, value) => [{ type: "text", text: describeEditResult(args.action, value) }]
       },
       async execute(args, exec) {
         if (!exec.agent) throw new Error("psd_edit requires an agent session");
-        const cwd = await ctx.workingDirectory.ensure(exec.agent, exec.signal);
+        const cwd = await resolveSessionCwd(ctx, exec);
         return editTemplate({ cwd, ...args });
       },
       timeoutMs: 5 * 60 * 1e3,
