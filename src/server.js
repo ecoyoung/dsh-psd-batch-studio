@@ -165,7 +165,9 @@ export async function inspectTemplate({ cwd, template }) {
         layer.textContent = entry.text.value
         layer.runCount = entry.text.runs.length
         if (entry.text.runs.length) {
-          layer.runs = entry.text.runs.slice(0, 8)
+          layer.runs = entry.text.runs
+            .slice(0, 8)
+            .map(({ family, ...run }) => (family ? { ...run, family } : run))
           layer.runsTruncated = entry.text.runs.length > 8
         }
       }
@@ -285,9 +287,28 @@ export async function renderBatch({
 }
 
 /**
+ * The calling session's workspace, which every relative path is anchored at.
+ *
+ * dsh >= 0.2.1 provides a `workingDirectory` service (what its own fs tools
+ * use); dsh 0.2.0 does not, and its fs tools read the session header instead.
+ * The service is read through `ctx.reflect.get`, which returns undefined when
+ * nothing provides it, because touching an undeclared service on `ctx` throws.
+ */
+async function resolveSessionCwd(ctx, exec) {
+  const service = ctx.reflect?.get?.('workingDirectory')
+  if (service && typeof service.ensure === 'function') {
+    return service.ensure(exec.agent, exec.signal)
+  }
+  const cwd = exec.agent?.session?.header?.cwd
+  if (typeof cwd === 'string' && cwd.length > 0) return cwd
+  throw new Error('This session has no workspace directory; open a workspace and try again')
+}
+
+/**
  * Register the agent tools for this Host plugin.
  *
- * @param ctx - Host context providing `tools` and `workingDirectory`.
+ * @param ctx - Host context providing `tools` (and, on dsh >= 0.2.1, a
+ *   `workingDirectory` service looked up per call, see `resolveSessionCwd`).
  * @returns disposer removing every tool registration.
  */
 export function registerTools(ctx) {
@@ -342,7 +363,9 @@ export function registerTools(ctx) {
                       required: ['len'],
                       properties: {
                         len: { type: 'integer' },
-                        family: { type: ['string', 'null'] },
+                        // dsh only accepts one type per schema node; a run
+                        // without a font name simply omits `family`.
+                        family: { type: 'string' },
                         weight: { type: 'integer' },
                         size: { type: 'number' },
                         color: { type: 'array', items: { type: 'integer' } },
@@ -382,7 +405,7 @@ export function registerTools(ctx) {
       },
       async execute(args, exec) {
         if (!exec.agent) throw new Error('psd_inspect requires an agent session')
-        const cwd = await ctx.workingDirectory.ensure(exec.agent, exec.signal)
+        const cwd = await resolveSessionCwd(ctx, exec)
         return inspectTemplate({ cwd, template: args.template })
       },
       isConcurrencySafe: () => false,
@@ -503,7 +526,7 @@ export function registerTools(ctx) {
       },
       async execute(args, exec) {
         if (!exec.agent) throw new Error('psd_batch_render requires an agent session')
-        const cwd = await ctx.workingDirectory.ensure(exec.agent, exec.signal)
+        const cwd = await resolveSessionCwd(ctx, exec)
         return renderBatch({
           cwd,
           template: args.template,
