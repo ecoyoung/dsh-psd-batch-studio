@@ -17574,6 +17574,67 @@ async function inspectTemplate({ cwd, template }) {
     suggestedSlots: slotSummary(doc, suggestedIds)
   };
 }
+var TEXT_OVERRIDE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["layer"],
+  properties: {
+    layer: { type: "string" },
+    value: { type: "string" },
+    runs: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["len"],
+        properties: {
+          len: { type: "integer" },
+          family: { type: "string" },
+          weight: { type: "number" },
+          size: { type: "number" },
+          color: { type: "string" },
+          tracking: { type: "number" }
+        }
+      }
+    },
+    font: { type: "string" },
+    weight: { type: "number" },
+    size: { type: "number" },
+    color: { type: "string" },
+    tracking: { type: "number" }
+  }
+};
+function schemaViolations(schema, value, at, out = []) {
+  const { type } = schema;
+  const matches = type === "array" ? Array.isArray(value) : type === "object" ? value !== null && typeof value === "object" && !Array.isArray(value) : type === "integer" ? Number.isInteger(value) : type === "number" ? typeof value === "number" && Number.isFinite(value) : typeof value === type;
+  if (!matches) {
+    out.push(`${at} must be ${type === "integer" ? "an integer" : `a${type === "object" || type === "array" ? "n" : ""} ${type}`}`);
+    return out;
+  }
+  if (schema.enum && !schema.enum.includes(value)) out.push(`${at} must be one of ${schema.enum.join(", ")}`);
+  if (type === "array" && schema.items) value.forEach((item, index) => schemaViolations(schema.items, item, `${at}[${index}]`, out));
+  if (type === "object") {
+    for (const key of schema.required || []) if (value[key] === void 0) out.push(`${at}.${key} is required`);
+    for (const [key, item] of Object.entries(value)) {
+      const sub = schema.properties && schema.properties[key];
+      if (sub) schemaViolations(sub, item, `${at}.${key}`, out);
+      else if (schema.additionalProperties === false) out.push(`${at}.${key} is not a known field`);
+    }
+  }
+  return out;
+}
+function assertTextBySku(textBySku) {
+  if (textBySku == null) return;
+  const problems = schemaViolations({ type: "object" }, textBySku, "textBySku");
+  if (!problems.length) {
+    for (const [sku, list] of Object.entries(textBySku)) {
+      schemaViolations({ type: "array", items: TEXT_OVERRIDE_SCHEMA }, list, `textBySku[${JSON.stringify(sku)}]`, problems);
+    }
+  }
+  if (problems.length) {
+    throw new Error(`Invalid textBySku: ${problems.slice(0, 5).join("; ")}${problems.length > 5 ? ` (+${problems.length - 5} more)` : ""}`);
+  }
+}
 async function renderBatch({
   cwd,
   template,
@@ -17592,6 +17653,7 @@ async function renderBatch({
   fontDir,
   zip = false
 }) {
+  assertTextBySku(textBySku);
   const absolute = await resolveInWorkspace(cwd, template);
   const doc = await loadTemplateDoc(absolute);
   const slotIds = slots.length > 0 ? resolveSlots(doc, slots) : suggestSlots(doc);
@@ -17840,73 +17902,14 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
           text: {
             type: "array",
             description: "Rewrite text layers in every render: [{layer, value, runs, font, weight, size, color, tracking}]. `layer` is a layer name or leaf id; `value` replaces the copy (styles follow their characters); `runs` [{len, family?, weight?, size?, color?, tracking?}] restyles exact segments; flat font/weight/size/color/tracking restyle all runs. `size` is in pt, exactly what psd_inspect reports; color is #rrggbb.",
-            items: {
-              type: "object",
-              additionalProperties: false,
-              required: ["layer"],
-              properties: {
-                layer: { type: "string" },
-                value: { type: "string" },
-                runs: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    additionalProperties: false,
-                    required: ["len"],
-                    properties: {
-                      len: { type: "integer" },
-                      family: { type: "string" },
-                      weight: { type: "number" },
-                      size: { type: "number" },
-                      color: { type: "string" },
-                      tracking: { type: "number" }
-                    }
-                  }
-                },
-                font: { type: "string" },
-                weight: { type: "number" },
-                size: { type: "number" },
-                color: { type: "string" },
-                tracking: { type: "number" }
-              }
-            }
+            items: TEXT_OVERRIDE_SCHEMA
           },
           textBySku: {
             type: "object",
-            additionalProperties: {
-              type: "array",
-              items: {
-                type: "object",
-                additionalProperties: false,
-                required: ["layer"],
-                properties: {
-                  layer: { type: "string" },
-                  value: { type: "string" },
-                  runs: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      additionalProperties: false,
-                      required: ["len"],
-                      properties: {
-                        len: { type: "integer" },
-                        family: { type: "string" },
-                        weight: { type: "number" },
-                        size: { type: "number" },
-                        color: { type: "string" },
-                        tracking: { type: "number" }
-                      }
-                    }
-                  },
-                  font: { type: "string" },
-                  weight: { type: "number" },
-                  size: { type: "number" },
-                  color: { type: "string" },
-                  tracking: { type: "number" }
-                }
-              }
-            },
-            description: "Per-SKU text overrides keyed by SKU file name (with or without extension), same shape as `text`; entries win over `text` per layer. Use it to give every SKU its own price."
+            // dsh only accepts a boolean here, so the per-SKU list shape is
+            // checked at call time against TEXT_OVERRIDE_SCHEMA instead.
+            additionalProperties: true,
+            description: 'Per-SKU text overrides: {"<SKU file name, with or without extension>": [<item>, ...]}, where each item has exactly the shape of a `text` item ({layer, value?, runs?, font?, weight?, size?, color?, tracking?}). Entries win over `text` per layer. Use it to give every SKU its own price.'
           },
           fontDir: {
             type: "string",

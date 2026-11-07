@@ -136,6 +136,38 @@ async function main() {
     )
     assert.equal(rendered.count, 1)
     await fs.access(path.join(workspace, 'out', rendered.files[0]))
+
+    // Per-SKU text goes through a free-form object (dsh only allows a boolean
+    // `additionalProperties`), so the plugin checks its shape itself.
+    const perSku = await call(
+      legacy.tools.get('psd_batch_render'),
+      {
+        template: 'tpl.psd',
+        skus: ['sku.png'],
+        slots: ['产品位'],
+        outDir: 'out-sku',
+        format: 'png',
+        text: [{ layer: '价格', color: '#0000ff' }],
+        textBySku: { sku: [{ layer: '价格', value: '¥1.00', runs: [{ len: 1 }, { len: 4, size: 24 }] }] },
+      },
+      sessionAt(workspace),
+    )
+    assert.equal(perSku.textVariants, 1)
+    for (const [textBySku, message] of [
+      [{ sku: { layer: '价格' } }, /textBySku\["sku"\] must be an array/],
+      [{ sku: [{ value: '¥1' }] }, /textBySku\["sku"\]\[0\]\.layer is required/],
+      [{ sku: [{ layer: '价格', price: '¥1' }] }, /\.price is not a known field/],
+      [{ sku: [{ layer: '价格', runs: [{ len: 1.5 }] }] }, /runs\[0\]\.len must be an integer/],
+    ]) {
+      await assert.rejects(
+        legacy.tools.get('psd_batch_render').execute(
+          { template: 'tpl.psd', skus: ['sku.png'], slots: ['产品位'], outDir: 'out-bad', textBySku },
+          sessionAt(workspace),
+        ),
+        message,
+      )
+    }
+    await assert.rejects(fs.access(path.join(workspace, 'out-bad')), 'nothing written for an invalid textBySku')
     legacy.dispose()
 
     // --- dsh >= 0.2.1: the workingDirectory service is preferred ------------
