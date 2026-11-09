@@ -29,6 +29,13 @@ export const zh = {
   'panel.adjustEmpty': '在右侧选择一张素材后开始微调',
   'panel.noTemplate': '载入模板后，这里会显示图层树',
 
+  'panel.text': '文字替换',
+  'panel.textEmpty': '模板里没有文字层',
+  'panel.textRuns': '按段改样式（JSON，与 psd_batch_render 的 runs 同一格式）',
+  'text.fontMissing': '字体未注册：{fonts}，将用回退字体渲染；点「字体」导入字体文件',
+  'action.loadFonts': '字体',
+  'action.applyRuns': '应用',
+
   'field.fit': '适配方式',
   'field.anchor': '对齐',
   'field.fill': '占位比例',
@@ -70,6 +77,10 @@ export const zh = {
   'toast.noItems': '请先导入 SKU 素材',
   'toast.cleared': '已清空素材队列',
   'toast.copied': '已同步到全部素材',
+  'toast.runsInvalid': '样式段 JSON 无法解析',
+  'toast.notFont': '请选择 ttf / otf / ttc / woff 字体文件',
+  'toast.fontsLoaded': '已注册 {count} 个字体',
+  'toast.textWarn': '文字重绘完成，但有 {count} 条警告',
 
   'export.format': '导出格式',
   'export.jpeg': 'JPG',
@@ -103,6 +114,13 @@ export const en = {
   'panel.adjust': 'Canvas fine-tune',
   'panel.adjustEmpty': 'Select a SKU on the right to fine-tune it',
   'panel.noTemplate': 'The layer tree appears after a template is loaded',
+
+  'panel.text': 'Text overrides',
+  'panel.textEmpty': 'No text layers in this template',
+  'panel.textRuns': 'Per-run styles (JSON, same shape as psd_batch_render runs)',
+  'text.fontMissing': 'Fonts not registered: {fonts} — they render with a fallback; load font files via "Fonts"',
+  'action.loadFonts': 'Fonts',
+  'action.applyRuns': 'Apply',
 
   'field.fit': 'Fit',
   'field.anchor': 'Anchor',
@@ -145,6 +163,10 @@ export const en = {
   'toast.noItems': 'Add SKU images first',
   'toast.cleared': 'SKU queue cleared',
   'toast.copied': 'Applied to every SKU',
+  'toast.runsInvalid': 'The runs JSON could not be parsed',
+  'toast.notFont': 'Choose ttf / otf / ttc / woff font files',
+  'toast.fontsLoaded': 'Registered {count} fonts',
+  'toast.textWarn': 'Text redrawn with {count} warning(s)',
 
   'export.format': 'Format',
   'export.jpeg': 'JPG',

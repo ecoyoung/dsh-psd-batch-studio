@@ -6119,7 +6119,7 @@ var require_descriptor = __commonJS({
       if (fx.overprint !== void 0)
         stroke.overprint = fx.overprint;
       if (fx["Clr "])
-        stroke.color = parseColor(fx["Clr "]);
+        stroke.color = parseColor2(fx["Clr "]);
       if (fx.Grad)
         stroke.gradient = parseGradientContent(fx);
       if (fx.Ptrn)
@@ -6424,13 +6424,13 @@ var require_descriptor = __commonJS({
             result.reverse = !!val;
             break;
           case "Clr ":
-            result.color = parseColor(val);
+            result.color = parseColor2(val);
             break;
           case "hglC":
-            result.highlightColor = parseColor(val);
+            result.highlightColor = parseColor2(val);
             break;
           case "sdwC":
-            result.shadowColor = parseColor(val);
+            result.shadowColor = parseColor2(val);
             break;
           case "Styl":
             result.position = exports.FStl.decode(val);
@@ -6709,7 +6709,7 @@ var require_descriptor = __commonJS({
           smoothness: grad.Intr / 4096,
           colorStops: grad.Clrs.map(function(s) {
             return {
-              color: parseColor(s["Clr "]),
+              color: parseColor2(s["Clr "]),
               location: s.Lctn / samples_1,
               midpoint: s.Mdpn / 100
             };
@@ -6824,7 +6824,7 @@ var require_descriptor = __commonJS({
       } else if ("Ptrn" in descriptor) {
         return __assign({ type: "pattern" }, parsePatternContent(descriptor));
       } else if ("Clr " in descriptor) {
-        return { type: "color", color: parseColor(descriptor["Clr "]) };
+        return { type: "color", color: parseColor2(descriptor["Clr "]) };
       } else {
         throw new Error("Invalid vector content");
       }
@@ -6877,7 +6877,7 @@ var require_descriptor = __commonJS({
       }
     }
     exports.serializeVectorContent = serializeVectorContent;
-    function parseColor(color) {
+    function parseColor2(color) {
       if ("H   " in color) {
         return { h: parsePercentOrAngle(color["H   "]), s: color.Strt, b: color.Brgh };
       } else if ("Rd  " in color) {
@@ -6894,7 +6894,7 @@ var require_descriptor = __commonJS({
         throw new Error("Unsupported color descriptor");
       }
     }
-    exports.parseColor = parseColor;
+    exports.parseColor = parseColor2;
     function serializeColor(color) {
       if (!color) {
         return { _name: "", _classID: "RGBC", "Rd  ": 0, "Grn ": 0, "Bl  ": 0 };
@@ -15645,7 +15645,7 @@ var require_dist = __commonJS({
 var import_ag_psd2 = __toESM(require_dist(), 1);
 import fs from "node:fs/promises";
 import path from "node:path";
-import { createCanvas as createCanvas2, loadImage } from "@napi-rs/canvas";
+import { createCanvas as createCanvas2, loadImage, GlobalFonts } from "@napi-rs/canvas";
 
 // node_modules/fflate/esm/index.mjs
 import { createRequire } from "module";
@@ -16385,6 +16385,413 @@ function createCanvas(width, height) {
 
 // src/core/psd.js
 var import_ag_psd = __toESM(require_dist(), 1);
+
+// src/core/text.js
+var FONT_FAMILY_MAP = [
+  [/^PingFangSC/i, "PingFang SC"],
+  [/^PingFang/i, "PingFang SC"],
+  [/^HiraginoSansGB/i, "Hiragino Sans GB"],
+  [/^MicrosoftYaHei/i, "Microsoft YaHei"],
+  [/^MicrosoftJhengHei/i, "Microsoft JhengHei"],
+  [/^(SourceHanSans|SourceHanSansCN|NotoSansSC|NotoSansCJK)/i, "Noto Sans SC"],
+  [/^SourceHanSerif/i, "Noto Serif SC"],
+  [/^SimHei|^STHeiti/i, "Heiti SC"],
+  [/^SimSun|^STSong/i, "Songti SC"],
+  [/^AlibabaPuHuiTi/i, "Alibaba PuHuiTi"],
+  [/^OPPOSans/i, "OPPO Sans"],
+  [/^HarmonyOS/i, "HarmonyOS Sans"],
+  [/^DIN/i, "DIN Alternate"],
+  [/^ArialMT|^Arial/i, "Arial"],
+  [/^HelveticaNeue|^Helvetica/i, "Helvetica Neue"],
+  [/^Inter/i, "Inter"],
+  [/^Roboto/i, "Roboto"]
+];
+function fontFamilyOf(name) {
+  const raw = String(name || "");
+  for (const [pattern, family] of FONT_FAMILY_MAP) {
+    if (pattern.test(raw)) return family;
+  }
+  return raw.split(/[-_ ]/)[0] || raw || null;
+}
+function fontWeightOf(name, fauxBold) {
+  const raw = String(name || "").toLowerCase();
+  if (/heavy|black|extrabold|ultrabold/.test(raw)) return 800;
+  if (/semibold|demibold|bold/.test(raw)) return 700;
+  if (/medium/.test(raw)) return 500;
+  if (/light|thin/.test(raw)) return 300;
+  return fauxBold ? 700 : 400;
+}
+function fillColorOf(fill) {
+  if (!fill) return [0, 0, 0];
+  if (fill.r != null) {
+    return [Math.round(fill.r ?? 0), Math.round(fill.g ?? 0), Math.round(fill.b ?? 0)];
+  }
+  if (fill.k != null && fill.c == null) {
+    const value = Math.round(fill.k);
+    return [value, value, value];
+  }
+  if (fill.c != null) {
+    const c = (fill.c ?? 0) / 255;
+    const m = (fill.m ?? 0) / 255;
+    const y = (fill.y ?? 0) / 255;
+    const k = (fill.k ?? 0) / 255;
+    return [
+      Math.round(255 * (1 - c) * (1 - k)),
+      Math.round(255 * (1 - m) * (1 - k)),
+      Math.round(255 * (1 - y) * (1 - k))
+    ];
+  }
+  return [0, 0, 0];
+}
+function parseColor(input) {
+  if (Array.isArray(input)) return [input[0] | 0, input[1] | 0, input[2] | 0];
+  const hex = String(input || "").replace(/^#/, "");
+  const value = parseInt(hex, 16);
+  if (!Number.isFinite(value)) return null;
+  return [value >> 16 & 255, value >> 8 & 255, value & 255];
+}
+function cssColor(color) {
+  return `rgb(${color[0]},${color[1]},${color[2]})`;
+}
+function describeTextStyle(raw) {
+  const style = raw || {};
+  return {
+    family: fontFamilyOf(style.font ? style.font.name : ""),
+    weight: fontWeightOf(style.font ? style.font.name : "", style.fauxBold),
+    size: Math.round((style.fontSize || 0) * 100) / 100,
+    color: fillColorOf(style.fillColor),
+    tracking: style.tracking || 0
+  };
+}
+function mergeTextStyle(base, raw, baseStyle) {
+  const style = raw && raw.style || {};
+  const has = (key) => style[key] !== void 0 && style[key] !== null;
+  const merged = { ...base };
+  if (has("font") && style.font && style.font.name) {
+    merged.family = fontFamilyOf(style.font.name);
+    merged.weight = fontWeightOf(style.font.name, has("fauxBold") ? style.fauxBold : baseStyle?.fauxBold);
+  } else if (has("fauxBold")) {
+    merged.weight = fontWeightOf(merged.family, style.fauxBold);
+  }
+  if (has("fontSize") && style.fontSize > 0) merged.size = Math.round(style.fontSize * 100) / 100;
+  if (has("fillColor") && style.fillColor) {
+    merged.color = [
+      Math.round(style.fillColor.r ?? 0),
+      Math.round(style.fillColor.g ?? 0),
+      Math.round(style.fillColor.b ?? 0)
+    ];
+  }
+  if (has("tracking")) merged.tracking = style.tracking;
+  return merged;
+}
+function describeTextLayer(text) {
+  const style = Array.isArray(text.style) ? text.style[0] : text.style || {};
+  const paragraph = Array.isArray(text.paragraphStyle) ? text.paragraphStyle[0] || {} : text.paragraphStyle || {};
+  const justification = String(paragraph.justification || "");
+  const base = describeTextStyle(style);
+  const value = String(text.text || "").replace(/\r$/, "").replace(/\r/g, "\n");
+  const runs = [];
+  for (const run of text.styleRuns || []) {
+    const length = Math.max(0, Math.round(run.length || 0));
+    if (!length) continue;
+    runs.push({ len: length, ...mergeTextStyle(base, run, style) });
+  }
+  let total = runs.reduce((sum, run) => sum + run.len, 0);
+  if (total !== value.length && runs.length) {
+    if (total < value.length) {
+      runs.push({ len: value.length - total, ...base });
+    } else {
+      let left = value.length;
+      for (let index = 0; index < runs.length && left > 0; index += 1) {
+        runs[index].len = Math.min(runs[index].len, left);
+        left -= runs[index].len;
+      }
+      while (runs.length && runs[runs.length - 1].len <= 0) runs.pop();
+    }
+  }
+  if (!runs.length && value.length) runs.push({ len: value.length, ...base });
+  return {
+    value,
+    runs,
+    align: /center/i.test(justification) ? "center" : /right/i.test(justification) ? "right" : "left"
+  };
+}
+function sameStyle(a, b) {
+  return a.family === b.family && a.weight === b.weight && a.size === b.size && a.tracking === b.tracking && a.color[0] === b.color[0] && a.color[1] === b.color[1] && a.color[2] === b.color[2];
+}
+function compressRuns(chars) {
+  const runs = [];
+  for (const { len: _len, ...style } of chars) {
+    const last = runs[runs.length - 1];
+    if (last && sameStyle(last, style)) last.len += 1;
+    else runs.push({ ...style, len: 1 });
+  }
+  return runs;
+}
+function remapRuns(runs, oldText, newText) {
+  const chars = [];
+  for (const run of runs || []) {
+    for (let index = 0; index < run.len; index += 1) chars.push(run);
+  }
+  while (chars.length < oldText.length && chars.length) chars.push(chars[chars.length - 1]);
+  if (!chars.length) return [];
+  let head = 0;
+  while (head < oldText.length && head < newText.length && oldText[head] === newText[head]) head += 1;
+  let tail = 0;
+  while (tail < oldText.length - head && tail < newText.length - head && oldText[oldText.length - 1 - tail] === newText[newText.length - 1 - tail]) {
+    tail += 1;
+  }
+  const inserted = newText.length - head - tail;
+  const inherit = chars[head - 1] || chars[head] || chars[0];
+  const out = chars.slice(0, head);
+  for (let index = 0; index < inserted; index += 1) out.push(inherit);
+  out.push(...chars.slice(oldText.length - tail));
+  while (out.length < newText.length) out.push(inherit);
+  return compressRuns(out.slice(0, newText.length));
+}
+function charStyles(runs, value) {
+  const out = [];
+  const source = runs && runs.length ? runs : [];
+  for (const run of source) {
+    for (let index = 0; index < run.len && out.length < value.length; index += 1) out.push(run);
+  }
+  while (out.length < value.length && source.length) out.push(source[source.length - 1]);
+  return out;
+}
+function mergeTextOverride(base, override = {}) {
+  const value = override.value != null ? String(override.value) : base.value;
+  if (value === base.value && !override.runs && override.font == null && override.weight == null && override.size == null && override.color == null && override.tracking == null) {
+    return null;
+  }
+  let runs = (value === base.value ? base.runs : remapRuns(base.runs, base.value, value)).map(
+    (run) => ({ ...run })
+  );
+  if (!runs.length && value.length) {
+    const only = base.runs[0];
+    runs = [{ len: value.length, ...only || { family: null, weight: 400, size: 24, color: [0, 0, 0], tracking: 0 } }];
+  }
+  if (Array.isArray(override.runs) && override.runs.length) {
+    const chars = charStyles(runs, value).map(({ len: _len, ...style }) => style);
+    let offset = 0;
+    for (const row of override.runs) {
+      const len = Math.max(0, Math.round(Number(row.len) || 0));
+      if (!len || offset >= chars.length) continue;
+      const patch2 = {};
+      if (row.family != null) patch2.family = String(row.family);
+      if (row.weight != null) patch2.weight = Number(row.weight);
+      if (row.size != null) patch2.size = Number(row.size);
+      if (row.tracking != null) patch2.tracking = Number(row.tracking);
+      if (row.color != null) {
+        const parsed = parseColor(row.color);
+        if (parsed) patch2.color = parsed;
+      }
+      const end = Math.min(chars.length, offset + len);
+      for (let index = offset; index < end; index += 1) chars[index] = { ...chars[index], ...patch2 };
+      offset = end;
+    }
+    if (chars.length) runs = compressRuns(chars);
+  }
+  const patch = {};
+  if (override.font != null) patch.family = String(override.font);
+  if (override.weight != null) patch.weight = Number(override.weight);
+  if (override.size != null) patch.size = Number(override.size);
+  if (override.tracking != null) patch.tracking = Number(override.tracking);
+  if (override.color != null) {
+    const parsed = parseColor(override.color);
+    if (parsed) patch.color = parsed;
+  }
+  if (Object.keys(patch).length) {
+    runs = runs.map((run) => ({ ...run, ...patch }));
+  }
+  return { value, runs, align: base.align };
+}
+function segmentsOf(chars, pxPerPt) {
+  const out = [];
+  for (const style of chars) {
+    const px = Math.max(1, style.size * pxPerPt);
+    const last = out[out.length - 1];
+    if (last && last.family === style.family && last.weight === style.weight && Math.abs(last.px - px) < 0.01 && last.tracking === style.tracking && last.color[0] === style.color[0] && last.color[1] === style.color[1] && last.color[2] === style.color[2]) {
+      last.text += style.ch;
+      continue;
+    }
+    out.push({
+      text: style.ch,
+      family: style.family,
+      weight: style.weight,
+      px,
+      tracking: style.tracking || 0,
+      color: style.color
+    });
+  }
+  return out;
+}
+function fontString(segment) {
+  return `${segment.weight} ${segment.px}px "${segment.family || "sans-serif"}", "PingFang SC", "Microsoft YaHei", sans-serif`;
+}
+function applyTracking(ctx, segment) {
+  try {
+    ctx.letterSpacing = `${(segment.tracking / 1e3 * segment.px).toFixed(2)}px`;
+  } catch {
+  }
+}
+function drawSegments(ctx, segments, x, baseline) {
+  let cursor = x;
+  for (const segment of segments) {
+    ctx.font = fontString(segment);
+    ctx.fillStyle = cssColor(segment.color);
+    applyTracking(ctx, segment);
+    ctx.fillText(segment.text, cursor, baseline);
+    const trackPx = segment.tracking / 1e3 * segment.px;
+    cursor += ctx.measureText(segment.text).width + Math.max(0, segment.text.length) * trackPx;
+  }
+}
+function measureSegments(ctx, segments) {
+  let width = 0;
+  for (const segment of segments) {
+    ctx.font = fontString(segment);
+    const trackPx = segment.tracking / 1e3 * segment.px;
+    width += ctx.measureText(segment.text).width + Math.max(0, segment.text.length) * trackPx;
+  }
+  return width;
+}
+function synthesizeTextLeaf(leaf, base, override, hasFont) {
+  const effective = mergeTextOverride(base, override);
+  if (!effective) {
+    restoreTextLeaf(leaf);
+    return [];
+  }
+  const warnings = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const run of effective.runs) {
+    if (!run.family || seen.has(run.family)) continue;
+    seen.add(run.family);
+    if (hasFont && !hasFont(run.family)) {
+      warnings.push(`\u5B57\u4F53 ${run.family} \u672A\u6CE8\u518C\uFF0C\u8BE5\u6BB5\u5C06\u7528\u56DE\u9000\u5B57\u4F53\u6E32\u67D3`);
+    }
+  }
+  const lines = effective.value.split("\n");
+  const chars = charStyles(effective.runs, effective.value);
+  const raster = leaf.__raster || {
+    left: leaf.left,
+    top: leaf.top,
+    width: leaf.width,
+    height: leaf.height
+  };
+  const origLines = Math.max(1, String(base.value || "\u5B57").split("\n").length);
+  const origMaxPt = base.runs.reduce((max, run) => Math.max(max, run.size || 0), 0) || 24;
+  const pxPerPt = raster.height > 0 ? raster.height / (origLines * origMaxPt * 1.2) : 1;
+  const perLine = [];
+  let cursor = 0;
+  for (const line of lines) {
+    const slice = [];
+    for (let index = 0; index < line.length; index += 1) {
+      slice.push({ ch: line[index], ...chars[cursor] });
+      cursor += 1;
+    }
+    perLine.push(segmentsOf(slice, pxPerPt));
+  }
+  const scratch = createCanvas(4, 4).getContext("2d");
+  const widths = perLine.map((segments) => measureSegments(scratch, segments));
+  const maxW = Math.max(1, ...widths);
+  const lineHeights = perLine.map((segments) => Math.max(1, ...segments.map((segment) => segment.px)) * 1.2);
+  const totalH = lineHeights.reduce((sum, height) => sum + height, 0);
+  const pad = Math.ceil(Math.max(1, ...lineHeights.map((h) => h / 1.2)) * 0.25) + 2;
+  const canvas = createCanvas(Math.max(1, Math.ceil(maxW) + pad * 2), Math.max(1, Math.ceil(totalH) + pad * 2));
+  const ctx = canvas.getContext("2d");
+  ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "left";
+  let top = pad;
+  for (let index = 0; index < perLine.length; index += 1) {
+    const segments = perLine[index];
+    const lineHeight = lineHeights[index];
+    const baseline = top + lineHeight * 0.82;
+    let x = pad;
+    if (effective.align === "center") x = pad + (maxW - widths[index]) / 2;
+    else if (effective.align === "right") x = pad + (maxW - widths[index]);
+    drawSegments(ctx, segments, x, baseline);
+    top += lineHeight;
+  }
+  let left = raster.left + raster.width / 2 - canvas.width / 2;
+  if (effective.align === "left") left = raster.left - pad;
+  else if (effective.align === "right") left = raster.left + raster.width - canvas.width + pad;
+  leaf.canvas = canvas;
+  leaf.left = Math.round(left);
+  leaf.top = Math.round(raster.top + raster.height / 2 - canvas.height / 2);
+  leaf.width = canvas.width;
+  leaf.height = canvas.height;
+  return warnings;
+}
+function restoreTextLeaf(leaf) {
+  if (!leaf.__raster) return;
+  leaf.canvas = leaf.__raster.canvas;
+  leaf.left = leaf.__raster.left;
+  leaf.top = leaf.__raster.top;
+  leaf.width = leaf.__raster.width;
+  leaf.height = leaf.__raster.height;
+}
+function applyTextOverrides(doc, overrides, hasFont) {
+  const warnings = [];
+  const list = Array.isArray(overrides) ? overrides : [];
+  for (const override of list) {
+    const target = String(override.layer ?? "");
+    const entry = doc.entries.find(
+      (item) => item.id === target || item.leafId === target || item.name === target
+    );
+    if (!entry) {
+      warnings.push(`\u6587\u5B57\u5C42\u4E0D\u5B58\u5728\uFF1A${target}`);
+      continue;
+    }
+    if (!entry.text || !entry.leafId) {
+      warnings.push(`${entry.name}\uFF1A\u6CA1\u6709\u6805\u683C\u50CF\u7D20\u6216\u6587\u5B57\u6570\u636E\uFF0C\u8DF3\u8FC7`);
+      continue;
+    }
+    const leaf = doc.leaves.find((item) => item.id === entry.leafId);
+    if (!leaf) {
+      warnings.push(`${entry.name}\uFF1A\u627E\u4E0D\u5230\u5BF9\u5E94\u56FE\u5C42\uFF0C\u8DF3\u8FC7`);
+      continue;
+    }
+    if (!leaf.__raster) {
+      leaf.__raster = {
+        canvas: leaf.canvas,
+        left: leaf.left,
+        top: leaf.top,
+        width: leaf.width,
+        height: leaf.height
+      };
+    } else {
+      restoreTextLeaf(leaf);
+    }
+    try {
+      warnings.push(...synthesizeTextLeaf(leaf, entry.text, override, hasFont));
+    } catch (error) {
+      restoreTextLeaf(leaf);
+      warnings.push(`${entry.name}\uFF1A\u91CD\u7ED8\u5931\u8D25\uFF08${error?.message || error}\uFF09\uFF0C\u4FDD\u7559\u539F\u50CF\u7D20`);
+    }
+  }
+  return warnings;
+}
+function cloneDoc(doc) {
+  return {
+    ...doc,
+    slots: new Set(doc.slots),
+    hidden: new Set(doc.hidden),
+    entries: doc.entries.map((entry) => ({ ...entry })),
+    leaves: doc.leaves.map((leaf) => ({ ...leaf }))
+  };
+}
+function mergeOverrideLists(globalList, skuList) {
+  const globalOverrides = Array.isArray(globalList) ? globalList : [];
+  const skuOverrides = Array.isArray(skuList) ? skuList : [];
+  if (!globalOverrides.length && !skuOverrides.length) return null;
+  if (!skuOverrides.length) return globalOverrides;
+  if (!globalOverrides.length) return skuOverrides;
+  const byTarget = /* @__PURE__ */ new Map();
+  for (const override of globalOverrides) byTarget.set(String(override.layer), override);
+  for (const override of skuOverrides) byTarget.set(String(override.layer), override);
+  return [...byTarget.values()];
+}
+
+// src/core/psd.js
 var makeCanvas = createCanvas;
 var BLEND_MODES = {
   normal: "source-over",
@@ -16446,120 +16853,6 @@ async function parseTemplate(file, onStage = () => {
     slots: /* @__PURE__ */ new Set(),
     size: file.size
   };
-}
-var FONT_FAMILY_MAP = [
-  [/^PingFangSC/i, "PingFang SC"],
-  [/^PingFang/i, "PingFang SC"],
-  [/^HiraginoSansGB/i, "Hiragino Sans GB"],
-  [/^MicrosoftYaHei/i, "Microsoft YaHei"],
-  [/^MicrosoftJhengHei/i, "Microsoft JhengHei"],
-  [/^(SourceHanSans|SourceHanSansCN|NotoSansSC|NotoSansCJK)/i, "Noto Sans SC"],
-  [/^SourceHanSerif/i, "Noto Serif SC"],
-  [/^SimHei|^STHeiti/i, "Heiti SC"],
-  [/^SimSun|^STSong/i, "Songti SC"],
-  [/^AlibabaPuHuiTi/i, "Alibaba PuHuiTi"],
-  [/^OPPOSans/i, "OPPO Sans"],
-  [/^HarmonyOS/i, "HarmonyOS Sans"],
-  [/^DIN/i, "DIN Alternate"],
-  [/^ArialMT|^Arial/i, "Arial"],
-  [/^HelveticaNeue|^Helvetica/i, "Helvetica Neue"],
-  [/^Inter/i, "Inter"],
-  [/^Roboto/i, "Roboto"]
-];
-function fontFamilyOf(name) {
-  const raw = String(name || "");
-  for (const [pattern, family] of FONT_FAMILY_MAP) {
-    if (pattern.test(raw)) return family;
-  }
-  return raw.split(/[-_ ]/)[0] || raw || null;
-}
-function fontWeightOf(name, fauxBold) {
-  const raw = String(name || "").toLowerCase();
-  if (/heavy|black|extrabold|ultrabold/.test(raw)) return 800;
-  if (/semibold|demibold|bold/.test(raw)) return 700;
-  if (/medium/.test(raw)) return 500;
-  if (/light|thin/.test(raw)) return 300;
-  return fauxBold ? 700 : 400;
-}
-function fillColorOf(fill) {
-  if (!fill) return [0, 0, 0];
-  if (fill.r != null) {
-    return [Math.round(fill.r ?? 0), Math.round(fill.g ?? 0), Math.round(fill.b ?? 0)];
-  }
-  if (fill.k != null && fill.c == null) {
-    const value = Math.round(fill.k);
-    return [value, value, value];
-  }
-  if (fill.c != null) {
-    const c = (fill.c ?? 0) / 255;
-    const m = (fill.m ?? 0) / 255;
-    const y = (fill.y ?? 0) / 255;
-    const k = (fill.k ?? 0) / 255;
-    return [
-      Math.round(255 * (1 - c) * (1 - k)),
-      Math.round(255 * (1 - m) * (1 - k)),
-      Math.round(255 * (1 - y) * (1 - k))
-    ];
-  }
-  return [0, 0, 0];
-}
-function describeTextStyle(raw) {
-  const style = raw || {};
-  return {
-    family: fontFamilyOf(style.font ? style.font.name : ""),
-    weight: fontWeightOf(style.font ? style.font.name : "", style.fauxBold),
-    size: Math.round((style.fontSize || 0) * 100) / 100,
-    color: fillColorOf(style.fillColor),
-    tracking: style.tracking || 0
-  };
-}
-function mergeTextStyle(base, raw, baseStyle) {
-  const style = raw && raw.style || {};
-  const has = (key) => style[key] !== void 0 && style[key] !== null;
-  const merged = { ...base };
-  if (has("font") && style.font && style.font.name) {
-    merged.family = fontFamilyOf(style.font.name);
-    merged.weight = fontWeightOf(style.font.name, has("fauxBold") ? style.fauxBold : baseStyle?.fauxBold);
-  } else if (has("fauxBold")) {
-    merged.weight = fontWeightOf(merged.family, style.fauxBold);
-  }
-  if (has("fontSize") && style.fontSize > 0) merged.size = Math.round(style.fontSize * 100) / 100;
-  if (has("fillColor") && style.fillColor) {
-    merged.color = [
-      Math.round(style.fillColor.r ?? 0),
-      Math.round(style.fillColor.g ?? 0),
-      Math.round(style.fillColor.b ?? 0)
-    ];
-  }
-  if (has("tracking")) merged.tracking = style.tracking;
-  return merged;
-}
-function describeTextLayer(text) {
-  const style = Array.isArray(text.style) ? text.style[0] : text.style || {};
-  const base = describeTextStyle(style);
-  const value = String(text.text || "").replace(/\r$/, "").replace(/\r/g, "\n");
-  const runs = [];
-  for (const run of text.styleRuns || []) {
-    const length = Math.max(0, Math.round(run.length || 0));
-    if (!length) continue;
-    runs.push({ len: length, ...mergeTextStyle(base, run, style) });
-  }
-  let total = runs.reduce((sum, run) => sum + run.len, 0);
-  if (total !== value.length && runs.length) {
-    if (total < value.length) {
-      runs.push({ len: value.length - total, ...base });
-    } else {
-      let left = value.length;
-      for (let index = 0; index < runs.length && left > 0; index += 1) {
-        runs[index].len = Math.min(runs[index].len, left);
-        left -= runs[index].len;
-      }
-      while (runs.length && runs[runs.length - 1].len <= 0) runs.pop();
-    }
-    total = runs.reduce((sum, run) => sum + run.len, 0);
-  }
-  if (!runs.length && value.length) runs.push({ len: value.length, ...base });
-  return { value, runs };
 }
 function buildTree(psd) {
   const entries = [];
@@ -16677,7 +16970,7 @@ function effectList(effects, name) {
   if (!value) return [];
   return (Array.isArray(value) ? value : [value]).filter((item) => item && item.enabled);
 }
-function cssColor(color, alpha = 1) {
+function cssColor2(color, alpha = 1) {
   if (!color) return `rgba(0,0,0,${alpha})`;
   const r = Math.round(color.r ?? 0);
   const g = Math.round(color.g ?? 0);
@@ -16712,7 +17005,7 @@ function paintGradient(ctx, width, height, effect) {
     );
   }
   for (const stop of stops) {
-    fill.addColorStop(Math.max(0, Math.min(1, stop.location)), cssColor(stop.color, 1));
+    fill.addColorStop(Math.max(0, Math.min(1, stop.location)), cssColor2(stop.color, 1));
   }
   ctx.save();
   ctx.globalCompositeOperation = "source-atop";
@@ -16783,7 +17076,7 @@ function composeLeaf(leaf, previous) {
     ctx.save();
     ctx.globalCompositeOperation = "source-atop";
     ctx.globalAlpha = solid.opacity ?? 1;
-    ctx.fillStyle = cssColor(solid.color, 1);
+    ctx.fillStyle = cssColor2(solid.color, 1);
     ctx.fillRect(0, 0, leaf.width, leaf.height);
     ctx.restore();
   }
@@ -16799,7 +17092,7 @@ function composeLeaf(leaf, previous) {
   const out = makeCanvas(leaf.width + pad * 2, leaf.height + pad * 2);
   const outCtx = out.getContext("2d");
   for (const shadow of shadows) {
-    const color = cssColor(shadow.color, shadow.opacity ?? 1);
+    const color = cssColor2(shadow.color, shadow.opacity ?? 1);
     const isGlow = shadow === effectList(leaf.effects, "outerGlow")[0];
     const distance = isGlow ? 0 : effectValue(shadow.distance);
     const angle = (shadow.angle ?? 120) * Math.PI / 180;
@@ -16814,7 +17107,7 @@ function composeLeaf(leaf, previous) {
   }
   if (stroke) {
     const width = effectValue(stroke.size);
-    const tinted = silhouette(base, cssColor(stroke.color, 1));
+    const tinted = silhouette(base, cssColor2(stroke.color, 1));
     const steps = 24;
     outCtx.save();
     outCtx.globalAlpha = stroke.opacity ?? 1;
@@ -16898,16 +17191,18 @@ function buildScene(doc) {
     if (!doc.slots.has(leaf.id) || claimed.has(leaf.id)) continue;
     claimed.add(leaf.id);
     let rect = leafBounds(leaf);
+    const members = /* @__PURE__ */ new Set([leaf.id]);
     for (const other of visibleLeaves) {
       if (claimed.has(other.id) || doc.slots.has(other.id)) continue;
       if (!isStackedCopy(leaf, other, doc)) continue;
       claimed.add(other.id);
+      members.add(other.id);
       rect = unionBounds(rect, leafBounds(other));
     }
     const cluster = {
       id: leaf.id,
       name: leaf.name,
-      members: /* @__PURE__ */ new Set([leaf.id]),
+      members,
       rect: {
         x: rect.left,
         y: rect.top,
@@ -16965,6 +17260,15 @@ function buildScene(doc) {
     width: doc.width,
     height: doc.height
   };
+}
+function disposeScene(scene) {
+  if (!scene) return;
+  for (const part of scene.parts) {
+    if (part.kind === "layers" && part.canvas) {
+      part.canvas.width = 1;
+      part.canvas.height = 1;
+    }
+  }
 }
 
 // src/core/fit.js
@@ -17094,7 +17398,38 @@ function uniqueName(used, base, extension) {
 setCanvasFactory((width, height) => createCanvas2(width, height));
 (0, import_ag_psd2.initializeCanvas)((width, height) => createCanvas2(width, height));
 var IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([".png", ".jpg", ".jpeg", ".webp", ".bmp"]);
+var FONT_EXTENSIONS = /* @__PURE__ */ new Set([".ttf", ".otf", ".ttc"]);
 var templateCache = /* @__PURE__ */ new Map();
+async function registerFontDir(cwd, dir) {
+  const absolute = await resolveInWorkspace(cwd, dir);
+  const stat = await fs.stat(absolute);
+  const files = stat.isDirectory() ? (await fs.readdir(absolute, { withFileTypes: true })).filter((entry) => entry.isFile()).map((entry) => path.join(absolute, entry.name)) : [absolute];
+  const registered = [];
+  const skipped = [];
+  for (const full of files) {
+    const extension = path.extname(full).toLowerCase();
+    if (!FONT_EXTENSIONS.has(extension)) {
+      skipped.push(path.basename(full));
+      continue;
+    }
+    const stem = path.basename(full, extension).replace(/_+/g, " ").trim() || "font";
+    try {
+      GlobalFonts.registerFromPath(full, stem);
+      registered.push(stem);
+      const mapped = fontFamilyOf(stem);
+      if (mapped && mapped !== stem && !GlobalFonts.has(mapped)) {
+        try {
+          GlobalFonts.registerFromPath(full, mapped);
+          registered.push(mapped);
+        } catch {
+        }
+      }
+    } catch {
+      skipped.push(path.basename(full));
+    }
+  }
+  return { registered, skipped };
+}
 async function resolveInWorkspace(cwd, candidate, { mustExist = true } = {}) {
   if (typeof candidate !== "string" || candidate.trim() === "") {
     throw new Error("A non-empty path is required");
@@ -17219,6 +17554,7 @@ async function inspectTemplate({ cwd, template }) {
     if (entry.kind === "text") layer.text = true;
     if (entry.text) {
       layer.textContent = entry.text.value;
+      layer.textAlign = entry.text.align;
       layer.runCount = entry.text.runs.length;
       if (entry.text.runs.length) {
         layer.runs = entry.text.runs.slice(0, 8).map(({ family, ...run }) => family ? { ...run, family } : run);
@@ -17238,6 +17574,67 @@ async function inspectTemplate({ cwd, template }) {
     suggestedSlots: slotSummary(doc, suggestedIds)
   };
 }
+var TEXT_OVERRIDE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["layer"],
+  properties: {
+    layer: { type: "string" },
+    value: { type: "string" },
+    runs: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["len"],
+        properties: {
+          len: { type: "integer" },
+          family: { type: "string" },
+          weight: { type: "number" },
+          size: { type: "number" },
+          color: { type: "string" },
+          tracking: { type: "number" }
+        }
+      }
+    },
+    font: { type: "string" },
+    weight: { type: "number" },
+    size: { type: "number" },
+    color: { type: "string" },
+    tracking: { type: "number" }
+  }
+};
+function schemaViolations(schema, value, at, out = []) {
+  const { type } = schema;
+  const matches = type === "array" ? Array.isArray(value) : type === "object" ? value !== null && typeof value === "object" && !Array.isArray(value) : type === "integer" ? Number.isInteger(value) : type === "number" ? typeof value === "number" && Number.isFinite(value) : typeof value === type;
+  if (!matches) {
+    out.push(`${at} must be ${type === "integer" ? "an integer" : `a${type === "object" || type === "array" ? "n" : ""} ${type}`}`);
+    return out;
+  }
+  if (schema.enum && !schema.enum.includes(value)) out.push(`${at} must be one of ${schema.enum.join(", ")}`);
+  if (type === "array" && schema.items) value.forEach((item, index) => schemaViolations(schema.items, item, `${at}[${index}]`, out));
+  if (type === "object") {
+    for (const key of schema.required || []) if (value[key] === void 0) out.push(`${at}.${key} is required`);
+    for (const [key, item] of Object.entries(value)) {
+      const sub = schema.properties && schema.properties[key];
+      if (sub) schemaViolations(sub, item, `${at}.${key}`, out);
+      else if (schema.additionalProperties === false) out.push(`${at}.${key} is not a known field`);
+    }
+  }
+  return out;
+}
+function assertTextBySku(textBySku) {
+  if (textBySku == null) return;
+  const problems = schemaViolations({ type: "object" }, textBySku, "textBySku");
+  if (!problems.length) {
+    for (const [sku, list] of Object.entries(textBySku)) {
+      schemaViolations({ type: "array", items: TEXT_OVERRIDE_SCHEMA }, list, `textBySku[${JSON.stringify(sku)}]`, problems);
+    }
+  }
+  if (problems.length) {
+    throw new Error(`Invalid textBySku: ${problems.slice(0, 5).join("; ")}${problems.length > 5 ? ` (+${problems.length - 5} more)` : ""}`);
+  }
+}
 async function renderBatch({
   cwd,
   template,
@@ -17251,8 +17648,12 @@ async function renderBatch({
   anchor = "center",
   fill = 1,
   adjustments = {},
+  text,
+  textBySku,
+  fontDir,
   zip = false
 }) {
+  assertTextBySku(textBySku);
   const absolute = await resolveInWorkspace(cwd, template);
   const doc = await loadTemplateDoc(absolute);
   const slotIds = slots.length > 0 ? resolveSlots(doc, slots) : suggestSlots(doc);
@@ -17267,39 +17668,78 @@ async function renderBatch({
   if (skuFiles.length === 0) {
     throw new Error("No SKU images were found. Pass `skus` paths or a `skuDir` folder.");
   }
+  let fontsRegistered;
+  let fontsSkipped;
+  if (fontDir) {
+    const registration = await registerFontDir(cwd, fontDir);
+    fontsRegistered = [...new Set(registration.registered)];
+    fontsSkipped = registration.skipped;
+  }
+  const textWarnings = [];
+  const groups = /* @__PURE__ */ new Map();
+  const used = /* @__PURE__ */ new Set();
+  const extensionFor = format === "png" ? "png" : "jpg";
+  const jobs = skuFiles.map((file, index) => {
+    const base = path.basename(file, path.extname(file));
+    const overrides = mergeOverrideLists(
+      text,
+      textBySku ? textBySku[path.basename(file)] ?? textBySku[base] : void 0
+    );
+    const signature = overrides ? JSON.stringify(overrides) : "";
+    let group = groups.get(signature);
+    if (!group) {
+      group = { overrides, jobs: [] };
+      groups.set(signature, group);
+    }
+    const job = { index, file, base, name: uniqueName(used, sanitizeName(base), extensionFor) };
+    group.jobs.push(job);
+    return job;
+  });
+  const textVariants = [...groups.values()].filter((group) => group.overrides).length;
   const stamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-").slice(0, 19);
   const relativeOut = outDir || path.join("out", "psd-batch", `${sanitizeName(doc.name)}-${stamp}`);
   const absoluteOut = await resolveInWorkspace(cwd, relativeOut, { mustExist: false });
   await fs.mkdir(absoluteOut, { recursive: true });
   const isPng = format === "png";
   const mime = isPng ? "image/png" : "image/jpeg";
-  const extension = isPng ? "png" : "jpg";
   const settings = {
     mode: fit || DEFAULT_SETTINGS.mode,
     anchor: anchor || DEFAULT_SETTINGS.anchor,
     fill: Number.isFinite(Number(fill)) ? Number(fill) : DEFAULT_SETTINGS.fill
   };
-  const used = /* @__PURE__ */ new Set();
-  const files = [];
-  const zipEntries = {};
-  for (const file of skuFiles) {
-    const image = await loadImage(file);
-    const content = measureContent(image);
-    const base = path.basename(file, path.extname(file));
-    const adjust = toAdjustment(adjustments[path.basename(file)] ?? adjustments[base]);
-    const canvas = createCanvas2(doc.width, doc.height);
-    const ctx = canvas.getContext("2d");
-    if (!isPng) {
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, doc.width, doc.height);
+  const zipBuffers = zip ? new Array(jobs.length) : null;
+  for (const group of groups.values()) {
+    let scene = doc.scene;
+    if (group.overrides) {
+      const clone = cloneDoc(doc);
+      textWarnings.push(...applyTextOverrides(clone, group.overrides, (family) => GlobalFonts.has(family)));
+      scene = buildScene(clone);
     }
-    drawScene(ctx, doc.scene, image, content, settings, adjust);
-    const buffer = canvas.toBuffer(mime, isPng ? void 0 : Math.round(quality));
-    const name = uniqueName(used, sanitizeName(base), extension);
-    await fs.writeFile(path.join(absoluteOut, name), buffer);
-    files.push(name);
-    if (zip) zipEntries[name] = new Uint8Array(buffer);
+    try {
+      for (const job of group.jobs) {
+        const image = await loadImage(job.file);
+        const content = measureContent(image);
+        const adjust = toAdjustment(adjustments[path.basename(job.file)] ?? adjustments[job.base]);
+        const canvas = createCanvas2(doc.width, doc.height);
+        const ctx = canvas.getContext("2d");
+        if (!isPng) {
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, doc.width, doc.height);
+        }
+        drawScene(ctx, scene, image, content, settings, adjust);
+        const buffer = canvas.toBuffer(mime, isPng ? void 0 : Math.round(quality));
+        await fs.writeFile(path.join(absoluteOut, job.name), buffer);
+        if (zipBuffers) zipBuffers[job.index] = new Uint8Array(buffer);
+      }
+    } finally {
+      if (scene !== doc.scene) disposeScene(scene);
+    }
   }
+  const files = jobs.map((job) => job.name);
+  const zipEntries = {};
+  if (zipBuffers) jobs.forEach((job) => {
+    zipEntries[job.name] = zipBuffers[job.index];
+  });
   let zipPath;
   if (zip) {
     const data = zipSync(zipEntries, { level: 0 });
@@ -17319,6 +17759,10 @@ async function renderBatch({
     suppressed: doc.scene.suppressed.slice(0, 50),
     suppressedCount: doc.scene.suppressed.length,
     suppressedTruncated: doc.scene.suppressed.length > 50,
+    textVariants,
+    ...fontsRegistered ? { fontsRegistered } : {},
+    ...fontsSkipped && fontsSkipped.length ? { fontsSkipped } : {},
+    ...textWarnings.length ? { textWarnings: [...new Set(textWarnings)] } : {},
     ...zipPath ? { zip: path.relative(cwd, zipPath) } : {}
   };
 }
@@ -17373,6 +17817,7 @@ function registerTools(ctx) {
                   leafId: { type: "string" },
                   bounds: { type: "array", items: { type: "integer" } },
                   textContent: { type: "string" },
+                  textAlign: { type: "string", enum: ["left", "center", "right"] },
                   runs: {
                     type: "array",
                     items: {
@@ -17430,7 +17875,7 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
   disposers.push(
     ctx.tools.register({
       name: "psd_batch_render",
-      description: "Render a PSD/PSB main-image template with many SKU images at once. Each SKU image is trimmed to its visible content, fitted into the product slots, composited between the template layers, and written as JPG/PNG into a workspace folder. Visible sibling layers that overlap a slot are suppressed together with the slot (reported as `suppressed`) so stale product art cannot show through. Returns the output folder and file names; optionally packs a ZIP.",
+      description: "Render a PSD/PSB main-image template with many SKU images at once. Each SKU image is trimmed to its visible content, fitted into the product slots, composited between the template layers, and written as JPG/PNG into a workspace folder. Visible sibling layers that overlap a slot are suppressed together with the slot (reported as `suppressed`) so stale product art cannot show through. Text layers can be rewritten per batch (`text`) or per SKU (`textBySku`) \u2014 re-rendered with real glyphs, not pasted pixels; register brand fonts first with `fontDir`. Returns the output folder and file names; optionally packs a ZIP.",
       parameters: {
         type: "object",
         additionalProperties: false,
@@ -17453,6 +17898,22 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
             type: "array",
             items: { type: "string" },
             description: "Product slot layer names or leaf ids. Omit to use the auto-detected slots reported by psd_inspect."
+          },
+          text: {
+            type: "array",
+            description: "Rewrite text layers in every render: [{layer, value, runs, font, weight, size, color, tracking}]. `layer` is a layer name or leaf id; `value` replaces the copy (styles follow their characters); `runs` [{len, family?, weight?, size?, color?, tracking?}] restyles exact segments; flat font/weight/size/color/tracking restyle all runs. `size` is in pt, exactly what psd_inspect reports; color is #rrggbb.",
+            items: TEXT_OVERRIDE_SCHEMA
+          },
+          textBySku: {
+            type: "object",
+            // dsh only accepts a boolean here, so the per-SKU list shape is
+            // checked at call time against TEXT_OVERRIDE_SCHEMA instead.
+            additionalProperties: true,
+            description: 'Per-SKU text overrides: {"<SKU file name, with or without extension>": [<item>, ...]}, where each item has exactly the shape of a `text` item ({layer, value?, runs?, font?, weight?, size?, color?, tracking?}). Entries win over `text` per layer. Use it to give every SKU its own price.'
+          },
+          fontDir: {
+            type: "string",
+            description: "Directory of .ttf/.otf font files to register before rendering. Registered family names (file stems) are returned in `fontsRegistered`."
           },
           outDir: {
             type: "string",
@@ -17483,7 +17944,7 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
         schema: {
           type: "object",
           additionalProperties: false,
-          required: ["count", "outDir", "files", "slots", "suppressed", "suppressedCount", "suppressedTruncated"],
+          required: ["count", "outDir", "files", "slots", "suppressed", "suppressedCount", "suppressedTruncated", "textVariants"],
           properties: {
             count: { type: "integer" },
             outDir: { type: "string" },
@@ -17516,14 +17977,21 @@ Auto slots: ${value.suggestedSlots.map((slot) => `${slot.name} [${slot.bounds.jo
               }
             },
             suppressedCount: { type: "integer" },
-            suppressedTruncated: { type: "boolean" }
+            suppressedTruncated: { type: "boolean" },
+            textVariants: { type: "integer" },
+            textWarnings: { type: "array", items: { type: "string" } },
+            fontsRegistered: { type: "array", items: { type: "string" } },
+            fontsSkipped: { type: "array", items: { type: "string" } }
           }
         },
         render: (_args, value) => [
           {
             type: "text",
             text: `Rendered ${value.count} image(s) into ${value.outDir} using ${value.slots.map((slot) => slot.name).join(", ")}${value.suppressed && value.suppressed.length ? `
-Suppressed overlapping slot siblings (hidden with the slot): ${value.suppressed.map((layer) => layer.name).join(", ")}${value.suppressedTruncated ? ` (+${value.suppressedCount - value.suppressed.length} more)` : ""}` : ""}${value.zip ? `
+Suppressed overlapping slot siblings (hidden with the slot): ${value.suppressed.map((layer) => layer.name).join(", ")}${value.suppressedTruncated ? ` (+${value.suppressedCount - value.suppressed.length} more)` : ""}` : ""}${value.textVariants ? `
+Text rewritten in ${value.textVariants} variant(s).` : ""}${value.fontsRegistered && value.fontsRegistered.length ? `
+Fonts registered: ${value.fontsRegistered.join(", ")}` : ""}${value.textWarnings && value.textWarnings.length ? `
+Text warnings: ${value.textWarnings.slice(0, 8).join("\uFF1B")}` : ""}${value.zip ? `
 ZIP: ${value.zip}` : ""}`
           }
         ]
@@ -17544,6 +18012,9 @@ ZIP: ${value.zip}` : ""}`
           anchor: args.anchor,
           fill: args.fill,
           adjustments: args.adjustments,
+          text: args.text,
+          textBySku: args.textBySku,
+          fontDir: args.fontDir,
           zip: args.zip
         });
       },
