@@ -77,9 +77,19 @@ out/0715-main/*.jpg  (+ optional ZIP)
 
 ## Requirements
 
-- DeepSeek Harness with the plugin manager. The plugin declares
-  `dsh.engines.dsh >= 0.2.1-rc.5` and was tested on `0.2.1-rc.5` and
-  `0.2.2-rc.1`.
+- DeepSeek Harness with the plugin manager, dsh `0.2.0-rc.2` or later
+  (`dsh.engines.dsh >= 0.2.0-rc.2`).
+  - Verified end to end on the desktop app 0.2.0-rc.2 (bundled dsh 0.2.0-rc.2,
+    pnpm 11.7.0): GitHub install, cold-start activation, the workbench panel,
+    both agent tools registered, and a real PSD batch.
+  - dsh `0.2.1-rc.5` and `0.2.2-rc.1`: tool registration and schemas checked
+    with the matching `@deepseek-ai/dsh-tools`. These releases provide the
+    `workingDirectory` service, which the tools prefer for the session
+    workspace; 0.2.0 has no such service, so they use the session's own
+    working directory there.
+  - Version 0.2.5's agent tools register on no dsh release
+    ([#7](https://github.com/vinkwork/dsh-psd-batch-studio/issues/7)); do not
+    use it.
 - Node.js 20+ for building and for the agent tools.
 - npm registry access on install: the agent tools depend on `@napi-rs/canvas`,
   which ships platform-specific prebuilt binaries.
@@ -93,13 +103,16 @@ out/0715-main/*.jpg  (+ optional ZIP)
 plugin_manager install_bundle, target = dsh-psd-batch-studio
 ```
 
-Pin a version with `dsh-psd-batch-studio@0.2.5` if you need a stable snapshot.
+Pin a version with `dsh-psd-batch-studio@0.2.6` if you need a stable snapshot.
 
 ### From the repository
 
 ```text
 plugin_manager install_bundle, target = github:vinkwork/dsh-psd-batch-studio
 ```
+
+pnpm pins a GitHub dependency to the commit it installed; reinstall to pick up
+later changes. Append `#branch` or `#commit` to install a specific one.
 
 If the plugin manager cannot resolve a GitHub spec, clone and install the local
 directory instead:
@@ -127,11 +140,35 @@ npm install
 npm run build
 ```
 
-Run the self-contained smoke test (generates a fixture PSD in a temp folder):
+Run the tests:
 
 ```bash
 npm test
 ```
+
+`npm test` runs the self-contained smoke test (fixture PSDs in a temp folder:
+compositing, slots, export), then the Host contract test. The contract test
+registers every agent tool through dsh's own `@deepseek-ai/dsh-tools` checks,
+pinned to 0.2.0-rc.2 (the desktop app's runtime): schemas must stay inside
+dsh's supported subset, `output.render` must exist, real results must match
+their output schema, and the workspace must resolve with and without the
+`workingDirectory` service. Run it after touching tool parameters or results:
+dsh rejects an unsupported schema at registration, which takes every tool down.
+
+## Troubleshooting
+
+**`ERR_PNPM_UNEXPECTED_STORE` on install.** A local environment issue, not the
+plugin: the profile's `node_modules` was installed by a different pnpm major
+(for example a terminal pnpm 10), while the desktop app uses its bundled pnpm 11
+and the two stores cannot be mixed. Move
+`~/.dsh/profiles/<profile>/node_modules` aside and reinstall from Harness. Do
+not install into a profile directory with a terminal pnpm.
+
+**The plugin installed, but the agent has no `psd_inspect` / `psd_batch_render`.**
+Make sure it is not version 0.2.5, whose tool schemas dsh rejects on every
+release ([#7](https://github.com/vinkwork/dsh-psd-batch-studio/issues/7)), and
+upgrade. Do not keep two copies of this plugin in one profile (an old local
+install plus the GitHub one, say): they share the `psd-batch-studio` entry.
 
 ## Using the workbench
 

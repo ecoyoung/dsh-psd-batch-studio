@@ -1,6 +1,6 @@
 {
   "name": "dsh-psd-batch-studio",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "DeepSeek Harness plugin for batch-producing e-commerce main images from PSD templates: product slots, SKU cut-out fitting, canvas fine-tune, and agent tools.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
@@ -45,7 +45,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "prepack": "npm run build",
-    "test": "node test/smoke.mjs"
+    "test": "node test/smoke.mjs && node test/dsh-host.mjs"
   },
   "dsh": {
     "bundle": {
@@ -59,7 +59,7 @@
       ]
     },
     "engines": {
-      "dsh": ">=0.2.1-rc.5"
+      "dsh": ">=0.2.0-rc.2"
     }
   },
   "engines": {
@@ -69,6 +69,7 @@
     "@napi-rs/canvas": "^1.1.0"
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
     "ag-psd": "^25.0.0",
     "esbuild": "^0.25.0",
     "fflate": "^0.8.3"

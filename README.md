@@ -54,8 +54,13 @@ out/0715-main/*.jpg（可选 ZIP）
 
 ## 环境要求
 
-- DeepSeek Harness（带插件管理器）。插件声明 `dsh.engines.dsh >= 0.2.1-rc.5`，
-  已在 `0.2.1-rc.5` 和 `0.2.2-rc.1` 上验证。
+- DeepSeek Harness（带插件管理器），dsh `0.2.0-rc.2` 及以上（`dsh.engines.dsh >= 0.2.0-rc.2`）。
+  - 桌面版 0.2.0-rc.2（内置 dsh 0.2.0-rc.2、pnpm 11.7.0）实机验证：从 GitHub 安装、冷启动激活、
+    面板渲染、两个 agent 工具注册，并在真实 PSD 上跑通。
+  - dsh `0.2.1-rc.5` 和 `0.2.2-rc.1`：用对应版本的 `@deepseek-ai/dsh-tools` 校验工具注册和 schema。
+    这两个版本提供 `workingDirectory` 服务，工具优先用它定位会话工作区；0.2.0 没有这个服务，
+    改用会话自身的工作目录。
+  - 0.2.5 的 agent 工具在所有 dsh 版本上都注册不上（[#7](https://github.com/vinkwork/dsh-psd-batch-studio/issues/7)），请勿使用。
 - Node.js 20+（构建和 Host 侧 agent 工具需要）。
 - 安装时需要能访问 npm registry：agent 工具依赖 `@napi-rs/canvas` 的平台预编译包。
 - 不需要安装 Photoshop。
@@ -68,13 +73,16 @@ out/0715-main/*.jpg（可选 ZIP）
 plugin_manager install_bundle, target = dsh-psd-batch-studio
 ```
 
-固定版本用 `dsh-psd-batch-studio@0.2.5`。
+固定版本用 `dsh-psd-batch-studio@0.2.6`。
 
 也可以从 GitHub 安装：
 
 ```text
 plugin_manager install_bundle, target = github:vinkwork/dsh-psd-batch-studio
 ```
+
+pnpm 会把 GitHub 依赖锁定到安装时的 commit；仓库更新后要重新安装才会生效。要装某个分支或 commit，
+在后面加 `#分支名` 或 `#commit`。
 
 如果插件管理器不支持 GitHub spec，克隆后指向本地目录：
 
@@ -145,6 +153,24 @@ npm run build
 ```bash
 npm test
 ```
+
+`npm test` 先跑冒烟测试（生成临时 PSD，检查合成、槽位和导出），再跑 Host 契约测试：用 dsh 自己的
+`@deepseek-ai/dsh-tools` 校验器（锁定桌面版内置的 0.2.0-rc.2）注册全部 agent 工具，检查 schema 是否在
+dsh 支持的子集内、`output.render` 是否齐全、真实返回值是否符合输出 schema，以及有无 `workingDirectory`
+服务时的工作区解析。改了工具参数或返回结构后务必跑一遍：schema 不合规时 dsh 会在注册阶段直接拒绝，
+所有工具都不可用。
+
+## 常见问题
+
+**安装时报 `ERR_PNPM_UNEXPECTED_STORE`。** 这是本机环境问题，与插件无关：profile 的
+`node_modules` 曾用另一个大版本的 pnpm 装过（例如终端里的 pnpm 10），而 Harness 桌面版用内置的
+pnpm 11，两者的 store 不能混用。把 `~/.dsh/profiles/<profile>/node_modules` 挪开备份，再在 Harness
+里重新安装即可。以后不要用终端里的 pnpm 往 profile 目录装东西。
+
+**插件装上了，但 agent 里没有 `psd_inspect` / `psd_batch_render`。** 先确认插件版本不是 0.2.5：
+该版本的工具 schema 不符合 dsh 的要求，在所有 dsh 版本上都注册不上
+（[#7](https://github.com/vinkwork/dsh-psd-batch-studio/issues/7)），请升级。同一个 profile 里
+也不要同时挂两份本插件（例如旧的本地安装加 GitHub 版），它们使用同一个 `psd-batch-studio` 条目。
 
 ## 已知限制
 
