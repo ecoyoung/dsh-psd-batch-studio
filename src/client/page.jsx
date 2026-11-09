@@ -21,7 +21,13 @@ import {
   uniqueName,
   zipFiles,
 } from '../core/export.js'
-import { applyTextOverrides, restoreTextLeaf, mergeTextOverride, fontFamilyOf } from '../core/text.js'
+import {
+  applyTextOverrides,
+  restoreTextLeaf,
+  mergeTextOverride,
+  fontFamilyOf,
+  readFontPostScriptName,
+} from '../core/text.js'
 import { CSS } from './styles.js'
 import { Icon } from './icons.jsx'
 
@@ -694,14 +700,24 @@ export function createStudio(ctx, t) {
             await face.load()
             document.fonts.add(face)
             loaded += 1
-            const mapped = fontFamilyOf(alias)
-            if (mapped && mapped !== alias) {
+            // PSD styles name fonts by PostScript name, the file may be named
+            // anything: register the name table's PostScript name and the
+            // mapped system family as aliases too.
+            const aliases = new Set()
+            const postScript = readFontPostScriptName(buffer)
+            if (postScript) aliases.add(postScript)
+            for (const name of [alias, postScript]) {
+              const mapped = name && fontFamilyOf(name)
+              if (mapped) aliases.add(mapped)
+            }
+            aliases.delete(alias)
+            for (const name of aliases) {
               try {
-                const alt = new FontFace(mapped, buffer.slice(0))
+                const alt = new FontFace(name, buffer.slice(0))
                 await alt.load()
                 document.fonts.add(alt)
               } catch {
-                /* the mapped alias may collide with a system family */
+                /* the alias may collide with a system family */
               }
             }
           } catch {

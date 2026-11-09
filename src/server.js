@@ -12,7 +12,15 @@ import { initializeCanvas } from 'ag-psd'
 import { zipSync } from 'fflate'
 import { setCanvasFactory } from './core/canvas.js'
 import { parseTemplate, buildScene, disposeScene, suggestSlots, isEntryVisible, isLeafVisible } from './core/psd.js'
-import { applyTextOverrides, cloneDoc, mergeOverrideLists, fontFamilyOf } from './core/text.js'
+import {
+  applyTextOverrides,
+  cloneDoc,
+  mergeOverrideLists,
+  mergeTextOverride,
+  pxPerPtOf,
+  fontFamilyOf,
+  readFontPostScriptName,
+} from './core/text.js'
 import { drawScene, measureContent, DEFAULT_SETTINGS, DEFAULT_ADJUST } from './core/fit.js'
 import { sanitizeName, uniqueName } from './core/export.js'
 
@@ -20,23 +28,34 @@ setCanvasFactory((width, height) => createCanvas(width, height))
 initializeCanvas((width, height) => createCanvas(width, height))
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp'])
-const FONT_EXTENSIONS = new Set(['.ttf', '.otf', '.ttc'])
+const FONT_EXTENSIONS = new Set(['.ttf', '.otf', '.ttc', '.otc', '.woff', '.woff2'])
 
 const templateCache = new Map()
 
+/** Every family name this process registered, for status and project files. */
+const registeredFamilies = new Set()
+
 /**
- * Register every .ttf/.otf/.ttc file in `dir` under its file stem (and its
- * mapped family alias, e.g. "SourceHanSansCN-Bold" → "Noto Sans SC") so text
- * overrides can reference either name.
+ * Register font files under every name a text layer may ask for: the file
+ * stem, the PostScript name from the font's name table (what PSD styles
+ * carry), and the mapped system family ("SourceHanSansCN-Bold" → "Noto Sans
+ * SC"). `dir` may be a folder or a single file; `paths` lists files.
  */
-async function registerFontDir(cwd, dir) {
-  const absolute = await resolveInWorkspace(cwd, dir)
-  const stat = await fs.stat(absolute)
-  const files = stat.isDirectory()
-    ? (await fs.readdir(absolute, { withFileTypes: true }))
-        .filter((entry) => entry.isFile())
-        .map((entry) => path.join(absolute, entry.name))
-    : [absolute]
+async function registerFonts(cwd, { dir, paths } = {}) {
+  const files = []
+  if (dir) {
+    const absolute = await resolveInWorkspace(cwd, dir)
+    const stat = await fs.stat(absolute)
+    if (stat.isDirectory()) {
+      const entries = await fs.readdir(absolute, { withFileTypes: true })
+      for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+        if (entry.isFile()) files.push(path.join(absolute, entry.name))
+      }
+    } else {
+      files.push(absolute)
+    }
+  }
+  for (const item of paths || []) files.push(await resolveInWorkspace(cwd, item))
 
   const registered = []
   const skipped = []
@@ -46,35 +65,71 @@ async function registerFontDir(cwd, dir) {
       skipped.push(path.basename(full))
       continue
     }
-    const stem = path.basename(full, extension).replace(/_+/g, ' ').trim() || 'font'
+    const stem = path.basename(full, extension).replace(/_+/g, ' ').replace(/\s+/g, ' ').trim() || 'font'
+    const aliases = [stem]
     try {
-      GlobalFonts.registerFromPath(full, stem)
-      registered.push(stem)
-      const mapped = fontFamilyOf(stem)
-      if (mapped && mapped !== stem && !GlobalFonts.has(mapped)) {
-        try {
-          GlobalFonts.registerFromPath(full, mapped)
-          registered.push(mapped)
-        } catch {
-          /* the mapped alias is taken by another face */
-        }
-      }
+      const postScript = readFontPostScriptName(await fs.readFile(full))
+      if (postScript) aliases.push(postScript)
     } catch {
-      skipped.push(path.basename(full))
+      /* unreadable name table: the file stem still works */
     }
+    for (const alias of [...aliases]) {
+      const mapped = fontFamilyOf(alias)
+      if (mapped && !aliases.includes(mapped) && !GlobalFonts.has(mapped)) aliases.push(mapped)
+    }
+    let ok = false
+    for (const alias of new Set(aliases)) {
+      try {
+        if (GlobalFonts.registerFromPath(full, alias) !== false) {
+          registered.push(alias)
+          registeredFamilies.add(alias)
+          ok = true
+        }
+      } catch {
+        /* this alias is taken by another face */
+      }
+    }
+    if (!ok) skipped.push(path.basename(full))
   }
-  return { registered, skipped }
+  return { registered: [...new Set(registered)], skipped }
 }
 
+/** Families a template's text layers (and its text edits) ask for. */
+function templateFamilies(doc) {
+  const families = new Set()
+  for (const entry of doc.entries) {
+    for (const run of entry.text?.runs || []) if (run.family) families.add(run.family)
+  }
+  for (const edit of doc.textEdits?.values() || []) {
+    if (edit.font) families.add(String(edit.font))
+    for (const run of edit.runs || []) if (run.family) families.add(String(run.family))
+  }
+  return [...families].sort()
+}
+
+function isInside(root, target) {
+  const relative = path.relative(root, target)
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+}
+
+/**
+ * Resolve a workspace path. Reads follow symlinks and must land inside the
+ * workspace. Writes (`mustExist: false`) check the real path of the target
+ * when it exists (a symlink must not lead out) and of its nearest existing
+ * ancestor, so a linked folder cannot redirect output elsewhere either.
+ */
 async function resolveInWorkspace(cwd, candidate, { mustExist = true } = {}) {
   if (typeof candidate !== 'string' || candidate.trim() === '') {
     throw new Error('A non-empty path is required')
   }
   const absolute = path.resolve(cwd, candidate)
-  const relative = path.relative(cwd, absolute)
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+  if (!isInside(cwd, absolute)) {
     throw new Error(`Path must stay inside the session workspace: ${candidate}`)
   }
+  const realCwd = await fs.realpath(cwd).catch(() => cwd)
+  const insideWorkspace = (real) => isInside(cwd, real) || isInside(realCwd, real)
+  const outside = () => new Error(`Path resolves outside the session workspace: ${candidate}`)
+
   if (mustExist) {
     let real
     try {
@@ -82,19 +137,81 @@ async function resolveInWorkspace(cwd, candidate, { mustExist = true } = {}) {
     } catch {
       throw new Error(`Path does not exist: ${candidate}`)
     }
-    const realRelative = path.relative(cwd, real)
-    if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
-      throw new Error(`Path resolves outside the session workspace: ${candidate}`)
-    }
+    if (!insideWorkspace(real)) throw outside()
     return real
+  }
+
+  const link = await fs.lstat(absolute).catch(() => null)
+  if (link) {
+    // A dangling link would make the write create its target, wherever it is.
+    const real = await fs.realpath(absolute).catch(() => null)
+    if (!real || !insideWorkspace(real)) throw outside()
+  }
+  let ancestor = path.dirname(absolute)
+  for (;;) {
+    const real = await fs.realpath(ancestor).catch(() => null)
+    if (real) {
+      if (!insideWorkspace(real)) throw outside()
+      break
+    }
+    const parent = path.dirname(ancestor)
+    if (parent === ancestor) break
+    ancestor = parent
   }
   return absolute
 }
 
+/**
+ * psd_edit state per template path. It lives outside the parse cache, which
+ * only keeps two documents: looking at other templates must not throw away
+ * unsaved edits. The state is dropped only when the PSD itself changes on
+ * disk, because its layer ids may no longer mean the same layers.
+ */
+const editStates = new Map()
+
+function editStateFor(absolutePath, stat) {
+  let state = editStates.get(absolutePath)
+  if (state && (state.mtimeMs !== stat.mtimeMs || state.size !== stat.size)) {
+    const hadEdits = state.textEdits.size > 0 || state.elements.length > 0 || !!state.pinnedSlots
+    state = { ...freshEditState(stat), dropped: hadEdits ? 'template changed on disk since the edits were made' : undefined }
+    editStates.set(absolutePath, state)
+  }
+  if (!state) {
+    state = freshEditState(stat)
+    editStates.set(absolutePath, state)
+  }
+  return state
+}
+
+function freshEditState(stat) {
+  return { mtimeMs: stat.mtimeMs, size: stat.size, textEdits: new Map(), elements: [], pinnedSlots: null }
+}
+
+/** Expose the path's edit state as doc.textEdits / elements / pinnedSlots. */
+function attachEditState(doc, absolutePath) {
+  if (doc.__editPath === absolutePath) return
+  Object.defineProperty(doc, '__editPath', { value: absolutePath, enumerable: false })
+  for (const key of ['textEdits', 'elements', 'pinnedSlots']) {
+    // Enumerable, so cloneDoc's spread carries the current values along.
+    Object.defineProperty(doc, key, {
+      enumerable: true,
+      configurable: true,
+      get: () => editStates.get(absolutePath)[key],
+      set: (value) => {
+        editStates.get(absolutePath)[key] = value
+      },
+    })
+  }
+}
+
 async function loadTemplateDoc(absolutePath) {
   const stat = await fs.stat(absolutePath)
+  editStateFor(absolutePath, stat)
   const cached = templateCache.get(absolutePath)
-  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.doc
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    attachEditState(cached.doc, absolutePath)
+    return cached.doc
+  }
 
   const buffer = await fs.readFile(absolutePath)
   const doc = await parseTemplate({
@@ -105,7 +222,25 @@ async function loadTemplateDoc(absolutePath) {
   })
   if (templateCache.size >= 2) templateCache.delete(templateCache.keys().next().value)
   templateCache.set(absolutePath, { mtimeMs: stat.mtimeMs, size: stat.size, doc })
+  attachEditState(doc, absolutePath)
   return doc
+}
+
+/**
+ * Point every override at its layer's entry id, so the same layer named by
+ * name in one list and by id in another still merges as one layer and the
+ * priority order (psd_edit < text < textBySku) holds.
+ */
+function canonicalOverrides(doc, list) {
+  if (!Array.isArray(list) || list.length === 0) return list
+  return list.map((override) => {
+    const target = String(override.layer ?? '')
+    const entry =
+      doc.entries.find((item) => item.id === target || item.leafId === target) ||
+      doc.entries.find((item) => item.name === target && item.text) ||
+      doc.entries.find((item) => item.name === target)
+    return entry ? { ...override, layer: entry.id } : override
+  })
 }
 
 function resolveSlots(doc, specs) {
@@ -231,38 +366,6 @@ export async function inspectTemplate({ cwd, template }) {
   }
 }
 
-/** One text override; `text` items and every `textBySku` list share it. */
-const TEXT_OVERRIDE_SCHEMA = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['layer'],
-  properties: {
-    layer: { type: 'string' },
-    value: { type: 'string' },
-    runs: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['len'],
-        properties: {
-          len: { type: 'integer' },
-          family: { type: 'string' },
-          weight: { type: 'number' },
-          size: { type: 'number' },
-          color: { type: 'string' },
-          tracking: { type: 'number' },
-        },
-      },
-    },
-    font: { type: 'string' },
-    weight: { type: 'number' },
-    size: { type: 'number' },
-    color: { type: 'string' },
-    tracking: { type: 'number' },
-  },
-}
-
 /**
  * Check a value against the small schema subset this file declares (type,
  * enum, items, properties, required, additionalProperties: false). Used where
@@ -337,7 +440,14 @@ export async function renderBatch({
   const absolute = await resolveInWorkspace(cwd, template)
   const doc = await loadTemplateDoc(absolute)
 
-  const slotIds = slots.length > 0 ? resolveSlots(doc, slots) : suggestSlots(doc)
+  // Explicit slots win; otherwise slots restored by load_project; otherwise
+  // the auto-detected ones.
+  const slotIds =
+    slots && slots.length > 0
+      ? resolveSlots(doc, slots)
+      : doc.pinnedSlots && doc.pinnedSlots.size
+        ? [...doc.pinnedSlots]
+        : suggestSlots(doc)
   if (slotIds.length === 0) {
     throw new Error(
       'No product slot was detected. Inspect the layer tree and pass one or more slot layer names.',
@@ -354,8 +464,8 @@ export async function renderBatch({
   let fontsRegistered
   let fontsSkipped
   if (fontDir) {
-    const registration = await registerFontDir(cwd, fontDir)
-    fontsRegistered = [...new Set(registration.registered)]
+    const registration = await registerFonts(cwd, { dir: fontDir })
+    fontsRegistered = registration.registered
     fontsSkipped = registration.skipped
   }
 
@@ -364,14 +474,17 @@ export async function renderBatch({
   // group starts, so 500 distinct prices hold one variant scene at a time
   // instead of 500. Output names are still assigned in the input order.
   const textWarnings = []
+  const savedEdits = doc.textEdits && doc.textEdits.size ? canonicalOverrides(doc, [...doc.textEdits.values()]) : null
+  const batchText = canonicalOverrides(doc, text)
   const groups = new Map()
   const used = new Set()
   const extensionFor = format === 'png' ? 'png' : 'jpg'
   const jobs = skuFiles.map((file, index) => {
     const base = path.basename(file, path.extname(file))
+    // psd_edit edits < batch `text` < `textBySku`, each winning per layer.
     const overrides = mergeOverrideLists(
-      text,
-      textBySku ? (textBySku[path.basename(file)] ?? textBySku[base]) : undefined,
+      mergeOverrideLists(savedEdits, batchText),
+      canonicalOverrides(doc, textBySku ? (textBySku[path.basename(file)] ?? textBySku[base]) : undefined),
     )
     const signature = overrides ? JSON.stringify(overrides) : ''
     let group = groups.get(signature)
@@ -399,6 +512,14 @@ export async function renderBatch({
   }
 
   const zipBuffers = zip ? new Array(jobs.length) : null
+  const zipPath = zip ? path.join(absoluteOut, `${sanitizeName(doc.name)}-${jobs.length}.zip`) : null
+
+  // Check every file the batch will write before rendering anything: a
+  // symlink planted at an output name inside a workspace folder must not
+  // redirect the write outside the workspace.
+  for (const target of [...jobs.map((job) => path.join(absoluteOut, job.name)), ...(zipPath ? [zipPath] : [])]) {
+    await resolveInWorkspace(cwd, path.relative(cwd, target), { mustExist: false })
+  }
 
   for (const group of groups.values()) {
     let scene = doc.scene
@@ -434,12 +555,7 @@ export async function renderBatch({
   const zipEntries = {}
   if (zipBuffers) jobs.forEach((job) => { zipEntries[job.name] = zipBuffers[job.index] })
 
-  let zipPath
-  if (zip) {
-    const data = zipSync(zipEntries, { level: 0 })
-    zipPath = path.join(absoluteOut, `${sanitizeName(doc.name)}-${files.length}.zip`)
-    await fs.writeFile(zipPath, data)
-  }
+  if (zipPath) await fs.writeFile(zipPath, zipSync(zipEntries, { level: 0 }))
 
   return {
     count: files.length,
@@ -462,6 +578,345 @@ export async function renderBatch({
   }
 }
 
+/** Resolve a text layer by entry id, leaf id or layer name. */
+function findTextEntry(doc, spec) {
+  const wanted = String(spec || '').trim()
+  if (!wanted) throw new Error('A text layer name or id is required')
+  const byId = doc.entries.find((entry) => entry.id === wanted || entry.leafId === wanted)
+  if (byId && byId.text) return byId
+  const matches = doc.entries.filter((entry) => entry.name === wanted && entry.text)
+  if (matches.length === 0) {
+    const names = doc.entries.filter((entry) => entry.text).map((entry) => entry.name)
+    throw new Error(`Text layer not found: ${wanted}. Text layers: ${names.join(' | ')}`)
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      `Text layer name is ambiguous (${matches.length} matches): ${wanted}. Use one of: ${matches
+        .map((entry) => entry.id)
+        .join(', ')}`,
+    )
+  }
+  return matches[0]
+}
+
+/** Fields a text override may carry; psd_edit and psd_batch_render share them. */
+const TEXT_OVERRIDE_FIELDS = [
+  'value',
+  'runs',
+  'font',
+  'weight',
+  'size',
+  'sizePx',
+  'color',
+  'tracking',
+  'align',
+  'leading',
+  'dx',
+  'dy',
+]
+
+/** Scale, rotate and return a canvas for a placed element. */
+function composeElement(image, { scale = 1, rotation = 0 } = {}) {
+  const width = Math.max(1, Math.round(image.width * scale))
+  const height = Math.max(1, Math.round(image.height * scale))
+  if (!rotation) {
+    const canvas = createCanvas(width, height)
+    canvas.getContext('2d').drawImage(image, 0, 0, width, height)
+    return canvas
+  }
+  const radians = (rotation * Math.PI) / 180
+  const cos = Math.abs(Math.cos(radians))
+  const sin = Math.abs(Math.sin(radians))
+  const canvas = createCanvas(Math.ceil(width * cos + height * sin), Math.ceil(width * sin + height * cos))
+  const ctx = canvas.getContext('2d')
+  ctx.translate(canvas.width / 2, canvas.height / 2)
+  ctx.rotate(radians)
+  ctx.drawImage(image, -width / 2, -height / 2, width, height)
+  return canvas
+}
+
+async function loadElement(cwd, spec) {
+  const file = await resolveInWorkspace(cwd, spec.source)
+  const image = await loadImage(file)
+  const scale = Number(spec.scale) > 0 ? Number(spec.scale) : 1
+  const rotation = Number(spec.rotation) || 0
+  return {
+    name: spec.name ? String(spec.name) : path.basename(file, path.extname(file)),
+    source: path.relative(cwd, file),
+    canvas: composeElement(image, { scale, rotation }),
+    left: Number(spec.left) || 0,
+    top: Number(spec.top) || 0,
+    scale,
+    rotation,
+    opacity: spec.opacity == null ? 1 : Math.max(0, Math.min(1, Number(spec.opacity))),
+    blend: spec.blend || 'normal',
+    aboveSlots: spec.aboveSlots !== false,
+  }
+}
+
+function currentSlots(doc) {
+  return [...(doc.pinnedSlots && doc.pinnedSlots.size ? doc.pinnedSlots : doc.slots || [])]
+}
+
+function serializeProject(doc, template) {
+  return {
+    version: 2,
+    template,
+    slots: currentSlots(doc),
+    textEdits: Object.fromEntries(doc.textEdits),
+    elements: doc.elements.map(({ canvas: _canvas, ...element }) => element),
+    fonts: [...registeredFamilies].sort(),
+  }
+}
+
+/**
+ * Read a project into a fresh state without touching the document. Every
+ * slot, text layer and element source is validated and loaded first, so a
+ * missing asset fails the load instead of leaving half a project applied.
+ */
+async function readProject(doc, cwd, project) {
+  if (!project || typeof project !== 'object') throw new Error('Project file is not a JSON object')
+  const slots = Array.isArray(project.slots) ? project.slots.map(String) : []
+  for (const id of slots) {
+    if (!doc.leaves.some((leaf) => leaf.id === id)) throw new Error(`Project slot not in this template: ${id}`)
+  }
+  const textEdits = new Map()
+  for (const [key, raw] of Object.entries(project.textEdits || {})) {
+    const entry = findTextEntry(doc, key)
+    textEdits.set(entry.id, { ...pickOverride(raw), layer: entry.id })
+  }
+  const elements = []
+  for (const spec of project.elements || []) {
+    if (!spec || !spec.source) throw new Error('Project element without a `source` image')
+    try {
+      elements.push(await loadElement(cwd, spec))
+    } catch (error) {
+      throw new Error(`Project element ${spec.name || spec.source}: ${error.message || error}`)
+    }
+  }
+  return { slots, textEdits, elements }
+}
+
+function pickOverride(raw) {
+  const out = {}
+  for (const key of TEXT_OVERRIDE_FIELDS) if (raw && raw[key] != null) out[key] = raw[key]
+  return out
+}
+
+function missingFamilies(doc) {
+  return templateFamilies(doc).filter((family) => !GlobalFonts.has(family))
+}
+
+/**
+ * Edit a template in place: copy, per-run styles, placed elements, fonts and
+ * the project file. Text edits are stored as overrides in the same shape as
+ * psd_batch_render's `text`, on the cached document, so the next render picks
+ * them up (its own `text`/`textBySku` still win per layer).
+ */
+export async function editTemplate(options) {
+  const { cwd, template, action } = options
+  if (!action) throw new Error('An action is required')
+  const absolute = await resolveInWorkspace(cwd, template)
+  const doc = await loadTemplateDoc(absolute)
+  if (!doc.textEdits) doc.textEdits = new Map()
+  if (!doc.elements) doc.elements = []
+
+  if (action === 'status') {
+    return {
+      template: path.relative(cwd, absolute) || template,
+      slots: currentSlots(doc),
+      slotsPinned: !!(doc.pinnedSlots && doc.pinnedSlots.size),
+      ...(editStates.get(absolute)?.dropped ? { editsDropped: editStates.get(absolute).dropped } : {}),
+      textEdits: [...doc.textEdits.keys()],
+      elements: doc.elements.map((element) => element.name),
+      fonts: [...registeredFamilies].sort(),
+      neededFonts: templateFamilies(doc),
+      missingFonts: missingFamilies(doc),
+    }
+  }
+
+  if (action === 'text') {
+    const entry = findTextEntry(doc, options.layer)
+    const patch = pickOverride(options)
+    if (!Object.keys(patch).length) {
+      throw new Error(`Pass at least one of: ${TEXT_OVERRIDE_FIELDS.join(', ')}`)
+    }
+    const edit = { ...(doc.textEdits.get(entry.id) || {}), ...patch, layer: entry.id }
+    // Dry run against the original geometry, so the reply shows what renders.
+    const leaf = doc.leaves.find((item) => item.id === entry.leafId)
+    const pxPerPt = leaf ? pxPerPtOf(entry.text, (leaf.__raster || leaf).height) : 0
+    const effective = mergeTextOverride(entry.text, edit, pxPerPt) || entry.text
+    doc.textEdits.set(entry.id, edit)
+    const missing = [...new Set(effective.runs.map((run) => run.family).filter(Boolean))].filter(
+      (family) => !GlobalFonts.has(family),
+    )
+    return {
+      layer: entry.name,
+      entryId: entry.id,
+      value: effective.value,
+      runs: effective.runs.map((run) => ({
+        len: run.len,
+        family: run.family,
+        weight: run.weight,
+        size: run.size,
+        sizePx: Math.round(run.size * pxPerPt * 100) / 100,
+        color: run.color,
+      })),
+      ...(missing.length
+        ? { warning: `Font not registered, the canvas will fall back: ${missing.join(', ')}` }
+        : {}),
+    }
+  }
+
+  if (action === 'element') {
+    if (!Array.isArray(options.paths) || options.paths.length === 0) {
+      throw new Error('Pass `paths` with one or more images')
+    }
+    const loaded = []
+    for (const source of options.paths) {
+      loaded.push(
+        await loadElement(cwd, {
+          source,
+          name: options.paths.length === 1 ? options.name : undefined,
+          left: options.dx,
+          top: options.dy,
+          scale: options.scale,
+          rotation: options.rotation,
+          opacity: options.opacity,
+          blend: options.blend,
+          aboveSlots: options.aboveSlots,
+        }),
+      )
+    }
+    doc.elements.push(...loaded)
+    return {
+      placed: loaded.map((element) => ({
+        name: element.name,
+        left: element.left,
+        top: element.top,
+        w: element.canvas.width,
+        h: element.canvas.height,
+        aboveSlots: element.aboveSlots,
+      })),
+      total: doc.elements.length,
+    }
+  }
+
+  if (action === 'remelement') {
+    const names = (options.names || []).map(String)
+    if (names.length === 0) throw new Error('Pass `names` with the elements to remove')
+    const before = doc.elements.length
+    doc.elements = doc.elements.filter((element) => !names.includes(element.name))
+    return {
+      removed: before - doc.elements.length,
+      total: doc.elements.length,
+      names: doc.elements.map((element) => element.name),
+    }
+  }
+
+  if (action === 'fonts') {
+    const paths = options.fonts || options.paths
+    if (!options.dir && !(paths && paths.length)) throw new Error('Pass `dir` or `fonts` with font files to register')
+    const result = await registerFonts(cwd, { dir: options.dir, paths })
+    return {
+      loaded: result.registered,
+      skipped: result.skipped,
+      registered: [...registeredFamilies].sort(),
+      missingFonts: missingFamilies(doc),
+    }
+  }
+
+  if (action === 'save_project') {
+    if (!options.project) throw new Error('Pass `project` with the JSON path to write')
+    const projectPath = await resolveInWorkspace(cwd, options.project, { mustExist: false })
+    await fs.mkdir(path.dirname(projectPath), { recursive: true })
+    // Re-check after mkdir: the folder that now exists must still be ours.
+    await resolveInWorkspace(cwd, path.relative(cwd, projectPath), { mustExist: false })
+    const data = serializeProject(doc, path.relative(cwd, absolute))
+    await fs.writeFile(projectPath, JSON.stringify(data, null, 2))
+    return {
+      project: path.relative(cwd, projectPath),
+      textEdits: Object.keys(data.textEdits).length,
+      elements: data.elements.length,
+      slots: data.slots,
+    }
+  }
+
+  if (action === 'load_project') {
+    if (!options.project) throw new Error('Pass `project` with the JSON path to read')
+    const projectPath = await resolveInWorkspace(cwd, options.project)
+    let project
+    try {
+      project = JSON.parse(await fs.readFile(projectPath, 'utf8'))
+    } catch (error) {
+      throw new Error(`Project file is not valid JSON: ${error.message || error}`)
+    }
+    const next = await readProject(doc, cwd, project)
+    // Everything loaded: swap the whole state in one step.
+    doc.textEdits = next.textEdits
+    doc.elements = next.elements
+    doc.pinnedSlots = next.slots.length ? new Set(next.slots) : null
+    editStates.get(absolute).dropped = undefined
+    if (next.slots.length) doc.slots = new Set(next.slots)
+    return {
+      project: path.relative(cwd, projectPath),
+      textEdits: doc.textEdits.size,
+      elements: doc.elements.length,
+      slots: currentSlots(doc),
+      missingFonts: missingFamilies(doc),
+    }
+  }
+
+  if (action === 'reset') {
+    doc.textEdits = new Map()
+    doc.elements = []
+    doc.pinnedSlots = null
+    editStates.get(absolute).dropped = undefined
+    return { ok: true, textEdits: 0, elements: 0 }
+  }
+
+  throw new Error(
+    `Unknown action: ${action}. Use status / text / element / remelement / fonts / save_project / load_project / reset`,
+  )
+}
+
+const TEXT_RUN_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['len'],
+  properties: {
+    len: { type: 'integer', description: 'Character count of this run.' },
+    family: { type: 'string', description: 'Font family or PostScript name.' },
+    weight: { type: 'number', description: 'Font weight, 100-900.' },
+    size: { type: 'number', description: 'Font size in PSD points.' },
+    sizePx: { type: 'number', description: 'Font size in canvas pixels; wins over `size`.' },
+    color: { type: 'string', description: 'Fill colour as #rrggbb.' },
+    tracking: { type: 'number', description: 'Letter spacing in 1/1000 em, as in Photoshop.' },
+  },
+}
+
+/** One text override; psd_batch_render `text`/`textBySku` and psd_edit share it. */
+const TEXT_OVERRIDE_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['layer'],
+  properties: {
+    layer: { type: 'string', description: 'Text layer name, entry id (e12) or leaf id (l3).' },
+    value: { type: 'string', description: 'New copy; characters keep their original styles.' },
+    runs: { type: 'array', items: TEXT_RUN_SCHEMA },
+    ...Object.fromEntries(
+      ['family', 'weight', 'size', 'sizePx', 'color', 'tracking'].map((key) => [
+        key === 'family' ? 'font' : key,
+        TEXT_RUN_SCHEMA.properties[key],
+      ]),
+    ),
+    align: { type: 'string', enum: ['left', 'center', 'right'], description: 'Paragraph alignment.' },
+    leading: { type: 'number', description: 'Fixed line height in PSD points.' },
+    dx: { type: 'number', description: 'Horizontal nudge in canvas pixels.' },
+    dy: { type: 'number', description: 'Vertical nudge in canvas pixels.' },
+  },
+}
+
 /**
  * The calling session's workspace, which every relative path is anchored at.
  *
@@ -478,6 +933,49 @@ async function resolveSessionCwd(ctx, exec) {
   const cwd = exec.agent?.session?.header?.cwd
   if (typeof cwd === 'string' && cwd.length > 0) return cwd
   throw new Error('This session has no workspace directory; open a workspace and try again')
+}
+
+const list = (items) => (items && items.length ? items.join(', ') : 'none')
+
+/** One summary line per psd_edit action, then the full result as JSON. */
+function describeEditResult(action, value) {
+  let summary
+  switch (action) {
+    case 'status':
+      summary = `${value.textEdits.length} text edit(s); elements: ${list(value.elements)}; slots${
+        value.slotsPinned ? ' (from project)' : ''
+      }: ${list(value.slots)}; missing fonts: ${list(value.missingFonts)}${
+        value.editsDropped ? `; edits dropped: ${value.editsDropped}` : ''
+      }`
+      break
+    case 'text':
+      summary = `${value.layer} (${value.entryId}) → ${JSON.stringify(value.value)} in ${value.runs.length} run(s)${
+        value.warning ? `. Warning: ${value.warning}` : ''
+      }`
+      break
+    case 'element':
+      summary = `placed ${list(value.placed.map((item) => `${item.name} at ${item.left},${item.top} (${item.w}×${item.h})`))}; ${value.total} element(s) total`
+      break
+    case 'remelement':
+      summary = `removed ${value.removed}; remaining: ${list(value.names)}`
+      break
+    case 'fonts':
+      summary = `registered ${list(value.loaded)}; skipped: ${list(value.skipped)}; still missing: ${list(value.missingFonts)}`
+      break
+    case 'save_project':
+      summary = `saved ${value.project}: ${value.textEdits} text edit(s), ${value.elements} element(s), slots ${list(value.slots)}`
+      break
+    case 'load_project':
+      summary = `loaded ${value.project}: ${value.textEdits} text edit(s), ${value.elements} element(s), slots ${list(value.slots)}; missing fonts: ${list(value.missingFonts)}`
+      break
+    case 'reset':
+      summary = 'all text edits, elements and project slots cleared'
+      break
+    default:
+      summary = 'done'
+  }
+  const json = JSON.stringify(value)
+  return `psd_edit ${action}: ${summary}\n${json.length > 4000 ? `${json.slice(0, 4000)}…` : json}`
 }
 
 /**
@@ -621,7 +1119,7 @@ export function registerTools(ctx) {
           text: {
             type: 'array',
             description:
-              'Rewrite text layers in every render: [{layer, value, runs, font, weight, size, color, tracking}]. `layer` is a layer name or leaf id; `value` replaces the copy (styles follow their characters); `runs` [{len, family?, weight?, size?, color?, tracking?}] restyles exact segments; flat font/weight/size/color/tracking restyle all runs. `size` is in pt, exactly what psd_inspect reports; color is #rrggbb.',
+              'Rewrite text layers in every render: [{layer, value, runs, font, weight, size, sizePx, color, tracking, align, leading, dx, dy}]. `layer` is a layer name or leaf id; `value` replaces the copy (styles follow their characters); `runs` [{len, family?, weight?, size?, sizePx?, color?, tracking?}] restyle consecutive segments from the first character; flat font/weight/size/sizePx/color/tracking restyle all runs. `size` is in pt, exactly what psd_inspect reports; `sizePx` is in canvas pixels; color is #rrggbb. Wins over psd_edit text edits for the same layer.',
             items: TEXT_OVERRIDE_SCHEMA,
           },
           textBySku: {
@@ -630,7 +1128,7 @@ export function registerTools(ctx) {
             // checked at call time against TEXT_OVERRIDE_SCHEMA instead.
             additionalProperties: true,
             description:
-              'Per-SKU text overrides: {"<SKU file name, with or without extension>": [<item>, ...]}, where each item has exactly the shape of a `text` item ({layer, value?, runs?, font?, weight?, size?, color?, tracking?}). Entries win over `text` per layer. Use it to give every SKU its own price.',
+              'Per-SKU text overrides: {"<SKU file name, with or without extension>": [<item>, ...]}, where each item has exactly the shape of a `text` item ({layer, value?, runs?, font?, weight?, size?, sizePx?, color?, tracking?, align?, leading?, dx?, dy?}). Entries win over `text` and psd_edit text edits per layer. Use it to give every SKU its own price.',
           },
           fontDir: {
             type: 'string',
@@ -755,6 +1253,93 @@ export function registerTools(ctx) {
         })
       },
       timeoutMs: 20 * 60 * 1000,
+      isConcurrencySafe: () => false,
+    }),
+  )
+
+  disposers.push(
+    ctx.tools.register({
+      name: 'psd_edit',
+      description:
+        'Edit a loaded PSD/PSB template before rendering: rewrite a text layer (same fields as one psd_batch_render `text` item, so a price line can mix two fonts, sizes and colours), place extra image layers above the product slot or between the background and the slot, register font files, and save or load the project so edits survive between sessions. Edits land on the cached document, so a following psd_batch_render uses them (its own `text`/`textBySku` still win per layer) and, after load_project, the project\'s slots when `slots` is omitted.',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['template', 'action'],
+        properties: {
+          template: {
+            type: 'string',
+            description: 'PSD or PSB path relative to the session working directory.',
+          },
+          action: {
+            type: 'string',
+            enum: [
+              'status',
+              'text',
+              'element',
+              'remelement',
+              'fonts',
+              'save_project',
+              'load_project',
+              'reset',
+            ],
+            description:
+              'status: current edits, fonts and missing fonts. text: rewrite a text layer. element / remelement: add or remove placed images. fonts: register font files. save_project / load_project: persist edits. reset: drop every edit.',
+          },
+          // action=text: the same fields as one psd_batch_render `text` item.
+          ...TEXT_OVERRIDE_SCHEMA.properties,
+          layer: {
+            type: 'string',
+            description: 'Text layer name, entry id (e12) or leaf id (l3). Required for action=text.',
+          },
+          dx: { type: 'number', description: 'Horizontal offset in canvas pixels (text nudge, or element left).' },
+          dy: { type: 'number', description: 'Vertical offset in canvas pixels (text nudge, or element top).' },
+          paths: {
+            type: 'array',
+            description: 'Images to place (relative paths). Required for action=element.',
+            items: { type: 'string' },
+          },
+          name: { type: 'string', description: 'Element name. Defaults to the file name.' },
+          scale: { type: 'number', description: 'Element scale, 1 = original size.' },
+          rotation: { type: 'number', description: 'Element rotation in degrees.' },
+          opacity: { type: 'number', description: 'Element opacity, 0-1.' },
+          blend: { type: 'string', description: 'Blend mode, e.g. multiply / screen / overlay.' },
+          aboveSlots: {
+            type: 'boolean',
+            description:
+              'Draw the element above everything (default true). Set false to place it directly under the lowest product slot, above the background.',
+          },
+          names: {
+            type: 'array',
+            description: 'Element names to remove (action=remelement).',
+            items: { type: 'string' },
+          },
+          dir: { type: 'string', description: 'Folder of font files to register (action=fonts).' },
+          fonts: {
+            type: 'array',
+            description: 'Font files to register (action=fonts).',
+            items: { type: 'string' },
+          },
+          project: {
+            type: 'string',
+            description: 'Project JSON path for action=save_project / load_project.',
+          },
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: true,
+        },
+        // dsh requires `render`: it is what the model reads back.
+        render: (args, value) => [{ type: 'text', text: describeEditResult(args.action, value) }],
+      },
+      async execute(args, exec) {
+        if (!exec.agent) throw new Error('psd_edit requires an agent session')
+        const cwd = await resolveSessionCwd(ctx, exec)
+        return editTemplate({ cwd, ...args })
+      },
+      timeoutMs: 5 * 60 * 1000,
       isConcurrencySafe: () => false,
     }),
   )

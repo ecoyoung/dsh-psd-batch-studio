@@ -49,16 +49,20 @@ out/0715-main/*.jpg（可选 ZIP）
   完整放入 / 按高度 / 按宽度 / 铺满裁切适配，并支持对齐和占比。
 - **画布微调**：拖动商品、拖角点缩放、数值调偏移/缩放/角度，可一键同步到全部 SKU。
 - **文字替换**：价格条、活动文案等文字层可以整批或按 SKU 重写，按 PSD 里的样式段用真实字形重绘
-  （不是贴图）；面板里也能改，导入字体后预览与导出一致。
+  （不是贴图）；可换字体、字号（pt 或 `sizePx` 像素）、颜色、字距、对齐、行距，面板里也能改，导入字体后预览与导出一致。
+- **逐段样式**：一条文案里可以混排（中文黑体 + 数字衬线红、不同字号），按 `{len, family, weight, size/sizePx, color, tracking}` 分段。
+- **字体注册**：导入字体文件即注册（文件名、PostScript 名、对应的系统字体名三个别名），模板缺字体时明确告警，不静默回退。
+- **元素置入**：往模板里加赠品小图、道具等图片层，可设位置、缩放、旋转、不透明度、混合模式，画在最上层，或背景之上、商品位之下。
+- **工程存档**：商品位、文字改动、元素、字体注册表存成 JSON，换机器或隔天继续。
 - **导出**：按模板原始分辨率输出 JPG/PNG，每个 SKU 一张，可打包 ZIP。
-- **Agent 工具**：`psd_inspect`、`psd_batch_render`，同一套内核在 Host 侧批量跑。
+- **Agent 工具**：`psd_inspect`、`psd_batch_render`、`psd_edit`，同一套内核在 Host 侧批量跑。
 - **本地优先**：PSD 解析和合成都在本机完成（页面内或 Host 进程），没有网络请求、没有埋点、不上传素材。
 
 ## 环境要求
 
 - DeepSeek Harness（带插件管理器），dsh `0.2.0-rc.2` 及以上（`dsh.engines.dsh >= 0.2.0-rc.2`）。
   - 桌面版 0.2.0-rc.2（内置 dsh 0.2.0-rc.2、pnpm 11.7.0）实机验证：从 GitHub 安装、冷启动激活、
-    面板渲染、两个 agent 工具注册，并在真实 PSD 上跑通。
+    面板渲染、三个 agent 工具（`psd_inspect`、`psd_batch_render`、`psd_edit`）注册，并在真实 PSD 上跑通。
   - dsh `0.2.1-rc.5` 和 `0.2.2-rc.1`：用对应版本的 `@deepseek-ai/dsh-tools` 校验工具注册和 schema。
     这两个版本提供 `workingDirectory` 服务，工具优先用它定位会话工作区；0.2.0 没有这个服务，
     改用会话自身的工作目录。
@@ -98,7 +102,7 @@ npm install
 plugin_manager install_bundle, target = /绝对路径/dsh-psd-batch-studio
 ```
 
-安装后刷新 Harness 页面：侧边栏出现「主图批量替换」图标，agent 侧出现两个工具。
+安装后刷新 Harness 页面：侧边栏出现「主图批量替换」图标，agent 侧出现下面三个工具。
 
 `client.js` / `server.js` 已随仓库提交，安装不需要先构建；改源码后执行 `npm run build`。
 
@@ -117,6 +121,7 @@ plugin_manager install_bundle, target = /绝对路径/dsh-psd-batch-studio
 | --- | --- |
 | `psd_inspect` | 返回模板尺寸、图层树（名称/层级/可见性/边界/图层 id）、自动识别的商品槽位；文字层额外返回文案、对齐和逐段字体样式（字体/字重/字号/颜色）。 |
 | `psd_batch_render` | 把一批 SKU 套进模板，输出 JPG/PNG（可选 ZIP）到工作区；支持 `text` / `textBySku` 重写文字层、`fontDir` 注册字体；结果里的 `suppressed` 列出随槽位一起隐藏的同组重叠图层。 |
+| `psd_edit` | 渲染前改模板：`text`（参数与 `psd_batch_render` 的一条 `text` 相同）、`element` / `remelement`（加减图片层）、`fonts`（注册字体文件）、`save_project` / `load_project`（工程存档，含商品位）、`status`、`reset`。改动落在缓存的文档上，随后的 `psd_batch_render` 直接生效，同层以渲染时传入的 `text` / `textBySku` 为准；载入工程后不传 `slots` 的渲染沿用工程里的商品位。编辑状态不随模板解析缓存淘汰，查看其他模板不会丢；PSD 文件本身改动后会清空，`status.editsDropped` 说明原因。同一图层用名称、entry id 或 leaf id 指定都按同一层合并。 |
 
 调用示例：
 
@@ -135,7 +140,7 @@ plugin_manager install_bundle, target = /绝对路径/dsh-psd-batch-studio
 }
 ```
 
-两个工具的路径都相对当前会话工作目录解析，并拒绝越界路径。`psd_batch_render` 默认 JPG、质量 92，
+三个工具的路径都相对当前会话工作目录解析，并拒绝越界路径（写入路径按真实路径校验，包括输出目录、每个导出文件和 ZIP，符号链接不能指到工作区外）。`psd_batch_render` 默认 JPG、质量 92，
 返回输出目录和前 50 个文件名。
 
 槽位所在的组里，其它「可见且与槽位重叠 ≥25%」的图层会随槽位一起隐藏（旧商品图、没对齐的
@@ -207,8 +212,10 @@ pnpm 11，两者的 store 不能混用。把 `~/.dsh/profiles/<profile>/node_mod
 
 ## 已知限制
 
-- 文字层默认用 PSD 里的栅格像素；可用 `text` / `textBySku` 活字重写（见「文字替换」），
-  未注册的字体会用回退字体渲染并在结果里点名。
+- 文字层默认用 PSD 里的栅格像素；可用 `text` / `textBySku` 或 `psd_edit` 活字重写（见「文字替换」）。
+  字号按图层原来的框把 pt 换算成像素，`sizePx` 直接按像素画；极端字号可能需要微调。
+- 未注册的字体会用回退字体渲染：渲染结果的 `textWarnings`、`psd_edit` 的 `warning` 和 `status.missingFonts`
+  都会点名，不会静默。
 - 斜面和浮雕、内阴影为近似或跳过；描边/投影/发光为近似。
 - 一次处理一个模板；「多模板 × 多 SKU」矩阵尚未内置，换模板时 SKU 队列会保留。
 - 几百 MB 的 PSB 需要几百 MB 内存；建议用桌面端或 Host 批量路径。

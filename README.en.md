@@ -70,12 +70,23 @@ out/0715-main/*.jpg  (+ optional ZIP)
   offset/scale/rotation numerically, and copy one adjustment to the whole batch.
 - **Text overrides** — price bars and campaign copy can be rewritten per batch or
   per SKU and re-rendered with real glyphs from the PSD's style runs (not pasted
-  pixels); the workbench panel edits the same data, and exports match once fonts
-  are loaded.
+  pixels): copy, font, size (pt, or `sizePx` in pixels), colour, tracking,
+  alignment and leading. The workbench panel edits the same data, and exports
+  match once fonts are loaded.
+- **Per-run styles** — one line can mix faces, sizes and colours through
+  `{len, family, weight, size/sizePx, color, tracking}` segments.
+- **Font registration** — imported font files register under their file stem,
+  their PostScript name and the mapped system family; a template that needs a
+  missing font is reported instead of silently falling back.
+- **Placed elements** — drop extra image layers (gift shots, props) with offset,
+  scale, rotation, opacity and blend mode, on top of everything or between the
+  background and the product slot.
+- **Project files** — slots, text edits, elements and the font registry persist
+  as JSON between sessions.
 - **Export** — JPG or PNG at the template resolution, one file per SKU, packed
   into a ZIP when requested.
-- **Agent tools** — `psd_inspect` and `psd_batch_render` expose the same pipeline
-  to the agent for unattended batches.
+- **Agent tools** — `psd_inspect`, `psd_batch_render` and `psd_edit` expose the
+  same pipeline to the agent for unattended batches.
 - **Local-first** — PSD parsing and compositing happen in the browser (or in the
   Host process for agent batches). No network calls, no telemetry, no upload.
 
@@ -85,7 +96,8 @@ out/0715-main/*.jpg  (+ optional ZIP)
   (`dsh.engines.dsh >= 0.2.0-rc.2`).
   - Verified end to end on the desktop app 0.2.0-rc.2 (bundled dsh 0.2.0-rc.2,
     pnpm 11.7.0): GitHub install, cold-start activation, the workbench panel,
-    both agent tools registered, and a real PSD batch.
+    all three agent tools (`psd_inspect`, `psd_batch_render`, `psd_edit`)
+    registered, and a real PSD batch.
   - dsh `0.2.1-rc.5` and `0.2.2-rc.1`: tool registration and schemas checked
     with the matching `@deepseek-ai/dsh-tools`. These releases provide the
     `workingDirectory` service, which the tools prefer for the session
@@ -132,7 +144,7 @@ plugin_manager install_bundle, target = /absolute/path/to/dsh-psd-batch-studio
 ```
 
 After installation, refresh the Harness page. A **PSD Batch Studio** icon
-appears in the sidebar, and the agent gains the two tools below.
+appears in the sidebar, and the agent gains the three tools below.
 
 ### Build artifacts
 
@@ -193,6 +205,7 @@ install plus the GitHub one, say): they share the `psd-batch-studio` entry.
 | --- | --- |
 | `psd_inspect` | Template size, layer tree (name, depth, visibility, bounds, leaf id), and auto-detected slots. Text layers also report their copy, alignment, and per-run styles (family, weight, size, color). |
 | `psd_batch_render` | Render many SKUs into one template and write JPG/PNG files (optionally a ZIP) inside the workspace. Supports `text` / `textBySku` text rewriting and `fontDir` font registration; the `suppressed` result lists slot siblings hidden together with the slot. |
+| `psd_edit` | Edit the template before rendering: `text` (same fields as one `psd_batch_render` `text` item), `element` / `remelement` (add or remove image layers), `fonts` (register font files), `save_project` / `load_project` (project round-trip, slots included), `status`, `reset`. Edits land on the cached document, so the next `psd_batch_render` uses them; its own `text` / `textBySku` win per layer, and after `load_project` a render without `slots` keeps the project's slots. Edits outlive the template parse cache, so viewing other templates keeps them; they are dropped only when the PSD changes on disk (`status.editsDropped` says so). A layer named by name, entry id or leaf id merges as the same layer. |
 
 Example request:
 
@@ -211,8 +224,10 @@ Example request:
 }
 ```
 
-Both tools resolve paths relative to the session working directory and refuse
-paths outside it. `psd_batch_render` defaults to JPG at quality 92 and returns
+All three tools resolve paths relative to the session working directory and
+refuse paths outside it; every write target (output folder, each exported file
+and the ZIP) is checked by its real path, so a symlink cannot lead out of the
+workspace. `psd_batch_render` defaults to JPG at quality 92 and returns
 the output folder plus the first 50 file names.
 
 Visible siblings inside a slot's group that overlap the slot by at least 25% are
@@ -285,9 +300,13 @@ server.js      built Host artifact
 
 ## Compatibility and limits
 
-- Text layers default to their rasterized PSD pixels; `text` / `textBySku`
-  rewrite them with live glyphs (see the agent-tools section), and unregistered
-  fonts fall back with a warning in the result.
+- Text layers default to their rasterized PSD pixels; `text` / `textBySku` or
+  `psd_edit` rewrite them with live glyphs (see the agent-tools section). Point
+  sizes map to pixels through the layer's original box and `sizePx` is drawn
+  as-is; extreme sizes may need a nudge.
+- Unregistered fonts fall back to a default face and are named in
+  `textWarnings`, in `psd_edit`'s `warning` and in `status.missingFonts` — never
+  silently.
 - Bevel/emboss and inner-shadow layer styles are approximated or skipped;
   stroke/shadow/glow are approximations. The compositor is tuned for typical
   e-commerce main-image templates.

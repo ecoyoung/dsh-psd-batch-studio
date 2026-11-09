@@ -37,11 +37,62 @@ export const FONT_FAMILY_MAP = [
 ]
 
 export function fontFamilyOf(name) {
-  const raw = String(name || '')
+  const raw = String(name || '').replace(/^#/, '').trim()
+  if (!raw) return null
   for (const [pattern, family] of FONT_FAMILY_MAP) {
     if (pattern.test(raw)) return family
   }
-  return raw.split(/[-_ ]/)[0] || raw || null
+  // Anything else is a PostScript name (GlowSansSC-Normal-Medium). Fonts are
+  // registered under that same name, so cutting it down to "GlowSansSC"
+  // would match neither the registered face nor a system family.
+  return raw
+}
+
+/**
+ * PostScript name (name ID 6) from a TTF/OTF/TTC buffer, or null.
+ *
+ * PSD text styles carry PostScript names while font files are usually named
+ * something else (苹方中黑_0.ttf); registering under both keeps a layer that
+ * says PingFangSC-Medium resolving to the file the user dropped in.
+ */
+export function readFontPostScriptName(buffer) {
+  try {
+    const bytes = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : buffer
+    const view = new DataView(bytes.buffer, bytes.byteOffset || 0, bytes.byteLength)
+    const tagAt = (offset) =>
+      String.fromCharCode(view.getUint8(offset), view.getUint8(offset + 1), view.getUint8(offset + 2), view.getUint8(offset + 3))
+    const fontStart = tagAt(0) === 'ttcf' ? view.getUint32(12) : 0
+    const tables = view.getUint16(fontStart + 4)
+    let nameOffset = 0
+    for (let index = 0; index < tables; index += 1) {
+      const record = fontStart + 12 + index * 16
+      if (tagAt(record) === 'name') {
+        nameOffset = view.getUint32(record + 8)
+        break
+      }
+    }
+    if (!nameOffset) return null
+    const count = view.getUint16(nameOffset + 2)
+    const stringsStart = nameOffset + view.getUint16(nameOffset + 4)
+    for (let index = 0; index < count; index += 1) {
+      const record = nameOffset + 6 + index * 12
+      if (view.getUint16(record + 6) !== 6) continue
+      const platformId = view.getUint16(record)
+      const length = view.getUint16(record + 8)
+      const start = stringsStart + view.getUint16(record + 10)
+      let value = ''
+      if (platformId === 3 || platformId === 0) {
+        for (let cursor = 0; cursor + 1 < length; cursor += 2) value += String.fromCharCode(view.getUint16(start + cursor))
+      } else {
+        for (let cursor = 0; cursor < length; cursor += 1) value += String.fromCharCode(view.getUint8(start + cursor))
+      }
+      value = value.trim()
+      if (value) return value
+    }
+  } catch {
+    return null
+  }
+  return null
 }
 
 export function fontWeightOf(name, fauxBold) {
@@ -158,11 +209,26 @@ export function describeTextLayer(text) {
     }
   }
   if (!runs.length && value.length) runs.push({ len: value.length, ...base })
+  // Fixed leading only; auto leading (the default) stays 0 and the layout
+  // uses 1.2 × the line's largest size.
+  const leading = style.autoLeading === false && style.leading > 0 ? Math.round(style.leading * 100) / 100 : 0
   return {
     value,
     runs,
     align: /center/i.test(justification) ? 'center' : /right/i.test(justification) ? 'right' : 'left',
+    leading,
   }
+}
+
+/**
+ * Canvas px per PSD pt for a text layer, from its ORIGINAL geometry only:
+ * raster height ≈ lines × largest pt × 1.2. Edits never feed back into this,
+ * so a pixel size asked for by a caller lands as exactly that many pixels.
+ */
+export function pxPerPtOf(base, rasterHeight) {
+  const lines = Math.max(1, String(base.value || '字').split('\n').length)
+  const maxPt = (base.runs || []).reduce((max, run) => Math.max(max, run.size || 0), 0) || 24
+  return rasterHeight > 0 ? rasterHeight / (lines * maxPt * 1.2) : 1
 }
 
 // ---------------------------------------------------------------------------
@@ -239,18 +305,33 @@ export function charStyles(runs, value) {
   return out
 }
 
+const ALIGNS = new Set(['left', 'center', 'right'])
+
+function sizeOf(row, pxPerPt) {
+  if (row.sizePx != null && Number(row.sizePx) > 0 && pxPerPt > 0) {
+    return Math.round((Number(row.sizePx) / pxPerPt) * 100) / 100
+  }
+  if (row.size != null && Number(row.size) > 0) return Number(row.size)
+  return null
+}
+
 /**
  * Merge a tool/panel override into the base text description.
  *
  * `value` rewrites the copy (styles follow their characters), `runs` restyles
- * exact segments `[{len, family?, weight?, size?, color?, tracking?}]`, and the
- * flat `font`/`weight`/`size`/`color`/`tracking` fields restyle every run.
+ * consecutive segments `[{len, family?, weight?, size?, sizePx?, color?,
+ * tracking?}]` from the first character, and the flat `font`/`weight`/`size`/
+ * `sizePx`/`color`/`tracking` fields restyle every run. `size` is in PSD pt;
+ * `sizePx` is in canvas px and needs `pxPerPt` (see `pxPerPtOf`), otherwise it
+ * is ignored. `align`/`leading` (pt)/`dx`/`dy` (px) adjust the layout.
  * Colors accept `#rrggbb` or `[r,g,b]`. Returns null when nothing changes.
  */
-export function mergeTextOverride(base, override = {}) {
+export function mergeTextOverride(base, override = {}, pxPerPt = 0) {
   const value = override.value != null ? String(override.value) : base.value
+  const layout = ['align', 'leading', 'dx', 'dy'].some((key) => override[key] != null)
   if (value === base.value && !override.runs && override.font == null && override.weight == null &&
-    override.size == null && override.color == null && override.tracking == null) {
+    override.size == null && override.sizePx == null && override.color == null &&
+    override.tracking == null && !layout) {
     return null
   }
 
@@ -274,7 +355,8 @@ export function mergeTextOverride(base, override = {}) {
       const patch = {}
       if (row.family != null) patch.family = String(row.family)
       if (row.weight != null) patch.weight = Number(row.weight)
-      if (row.size != null) patch.size = Number(row.size)
+      const size = sizeOf(row, pxPerPt)
+      if (size != null) patch.size = size
       if (row.tracking != null) patch.tracking = Number(row.tracking)
       if (row.color != null) {
         const parsed = parseColor(row.color)
@@ -290,7 +372,8 @@ export function mergeTextOverride(base, override = {}) {
   const patch = {}
   if (override.font != null) patch.family = String(override.font)
   if (override.weight != null) patch.weight = Number(override.weight)
-  if (override.size != null) patch.size = Number(override.size)
+  const size = sizeOf(override, pxPerPt)
+  if (size != null) patch.size = size
   if (override.tracking != null) patch.tracking = Number(override.tracking)
   if (override.color != null) {
     const parsed = parseColor(override.color)
@@ -299,7 +382,14 @@ export function mergeTextOverride(base, override = {}) {
   if (Object.keys(patch).length) {
     runs = runs.map((run) => ({ ...run, ...patch }))
   }
-  return { value, runs, align: base.align }
+  return {
+    value,
+    runs,
+    align: ALIGNS.has(override.align) ? override.align : base.align,
+    leading: Number(override.leading) > 0 ? Number(override.leading) : base.leading || 0,
+    dx: Number(override.dx) || 0,
+    dy: Number(override.dy) || 0,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -383,7 +473,17 @@ function measureSegments(ctx, segments) {
  * @returns {string[]} warnings for fonts that could not be resolved.
  */
 export function synthesizeTextLeaf(leaf, base, override, hasFont) {
-  const effective = mergeTextOverride(base, override)
+  const raster = leaf.__raster || {
+    left: leaf.left,
+    top: leaf.top,
+    width: leaf.width,
+    height: leaf.height,
+  }
+  // Point size → canvas px comes from the ORIGINAL geometry only, so editing
+  // the value never rescales existing glyphs (price bars keep their size) and
+  // a `sizePx` override is drawn at exactly that pixel size.
+  const pxPerPt = pxPerPtOf(base, raster.height)
+  const effective = mergeTextOverride(base, override, pxPerPt)
   if (!effective) {
     restoreTextLeaf(leaf)
     return []
@@ -401,17 +501,6 @@ export function synthesizeTextLeaf(leaf, base, override, hasFont) {
 
   const lines = effective.value.split('\n')
   const chars = charStyles(effective.runs, effective.value)
-  const raster = leaf.__raster || {
-    left: leaf.left,
-    top: leaf.top,
-    width: leaf.width,
-    height: leaf.height,
-  }
-  // Point size → canvas px comes from the ORIGINAL geometry only, so editing
-  // the value never rescales existing glyphs (price bars keep their size).
-  const origLines = Math.max(1, String(base.value || '字').split('\n').length)
-  const origMaxPt = base.runs.reduce((max, run) => Math.max(max, run.size || 0), 0) || 24
-  const pxPerPt = raster.height > 0 ? raster.height / (origLines * origMaxPt * 1.2) : 1
 
   const perLine = []
   let cursor = 0
@@ -427,9 +516,13 @@ export function synthesizeTextLeaf(leaf, base, override, hasFont) {
   const scratch = makeCanvas(4, 4).getContext('2d')
   const widths = perLine.map((segments) => measureSegments(scratch, segments))
   const maxW = Math.max(1, ...widths)
-  const lineHeights = perLine.map((segments) => Math.max(1, ...segments.map((segment) => segment.px)) * 1.2)
+  const fixedLeading = effective.leading > 0 ? effective.leading * pxPerPt : 0
+  const lineHeights = perLine.map(
+    (segments) => fixedLeading || Math.max(1, ...segments.map((segment) => segment.px)) * 1.2,
+  )
   const totalH = lineHeights.reduce((sum, height) => sum + height, 0)
-  const pad = Math.ceil(Math.max(1, ...lineHeights.map((h) => h / 1.2)) * 0.25) + 2
+  const maxPx = Math.max(1, ...perLine.flatMap((segments) => segments.map((segment) => segment.px)))
+  const pad = Math.ceil(maxPx * 0.25) + 2
 
   const canvas = makeCanvas(Math.max(1, Math.ceil(maxW) + pad * 2), Math.max(1, Math.ceil(totalH) + pad * 2))
   const ctx = canvas.getContext('2d')
@@ -455,8 +548,8 @@ export function synthesizeTextLeaf(leaf, base, override, hasFont) {
   else if (effective.align === 'right') left = raster.left + raster.width - canvas.width + pad
 
   leaf.canvas = canvas
-  leaf.left = Math.round(left)
-  leaf.top = Math.round(raster.top + raster.height / 2 - canvas.height / 2)
+  leaf.left = Math.round(left + effective.dx)
+  leaf.top = Math.round(raster.top + raster.height / 2 - canvas.height / 2 + effective.dy)
   leaf.width = canvas.width
   leaf.height = canvas.height
   return warnings

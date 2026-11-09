@@ -90,6 +90,8 @@ export async function parseTemplate(file, onStage = () => {}) {
     hidden,
     slots: new Set(),
     size: file.size,
+    // Images placed by psd_edit; drawn through the same layer compositor.
+    elements: [],
   }
 }
 
@@ -496,13 +498,56 @@ function isStackedCopy(base, other, doc) {
  */
 const SLOT_SIBLING_OVERLAP = 0.25
 
+/** Placed images as leaves, so they ride through the layer compositor. */
+function elementLeaves(doc) {
+  return (doc.elements || [])
+    .filter((element) => element.canvas)
+    .map((element, index) => ({
+      id: `x${index}`,
+      entryId: null,
+      name: element.name || `元素 ${index + 1}`,
+      left: Math.round(element.left || 0),
+      top: Math.round(element.top || 0),
+      width: element.canvas.width,
+      height: element.canvas.height,
+      canvas: element.canvas,
+      mask: null,
+      opacity: element.opacity == null ? 1 : element.opacity,
+      blendMode: element.blend || 'normal',
+      clipping: false,
+      effects: null,
+      path: [],
+      isElement: true,
+      aboveSlots: element.aboveSlots !== false,
+    }))
+}
+
+/**
+ * The PSD stack with placed elements folded in. Elements above the slots go
+ * on top of everything; elements below go directly under the lowest slot, so
+ * they stay above the background instead of vanishing under it. Without a
+ * slot they sit right above the bottom layer.
+ */
+function stackWithElements(doc, leaves) {
+  const elements = elementLeaves(doc)
+  if (!elements.length) return leaves
+  const above = elements.filter((element) => element.aboveSlots)
+  const below = elements.filter((element) => !element.aboveSlots)
+  let at = leaves.findIndex((leaf) => doc.slots.has(leaf.id))
+  if (at < 0) at = Math.min(1, leaves.length)
+  return [...leaves.slice(0, at), ...below, ...leaves.slice(at), ...above]
+}
+
 /**
  * Split the visible layer stack into background runs and product slots.
  *
  * @returns {{parts: Array<object>, slots: Array<object>, suppressed: Array<object>, width: number, height: number}}
  */
 export function buildScene(doc) {
-  const visibleLeaves = doc.leaves.filter((leaf) => isLeafVisible(doc, leaf))
+  const visibleLeaves = stackWithElements(
+    doc,
+    doc.leaves.filter((leaf) => isLeafVisible(doc, leaf)),
+  )
   const entryById = new Map(doc.entries.map((entry) => [entry.id, entry]))
   const clusters = []
   const clusterOf = new Map()
@@ -520,7 +565,7 @@ export function buildScene(doc) {
     // cluster so the draw pass skips it, or it paints over the SKU.
     const members = new Set([leaf.id])
     for (const other of visibleLeaves) {
-      if (claimed.has(other.id) || doc.slots.has(other.id)) continue
+      if (claimed.has(other.id) || doc.slots.has(other.id) || other.isElement) continue
       if (!isStackedCopy(leaf, other, doc)) continue
       claimed.add(other.id)
       members.add(other.id)
@@ -554,7 +599,7 @@ export function buildScene(doc) {
     const parent = entryById.get(leaf.entryId)?.parentId
     if (!parent) continue
     for (const other of visibleLeaves) {
-      if (claimed.has(other.id) || doc.slots.has(other.id)) continue
+      if (claimed.has(other.id) || doc.slots.has(other.id) || other.isElement) continue
       if (!other.path.includes(parent)) continue
       if (boundsOverlapRatio(leafBounds(leaf), leafBounds(other)) < SLOT_SIBLING_OVERLAP) continue
       cluster.members.add(other.id)

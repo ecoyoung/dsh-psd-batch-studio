@@ -119,7 +119,7 @@ async function main() {
 
     // --- dsh 0.2.0: no workingDirectory service, the session header wins ----
     const legacy = register()
-    assert.deepEqual([...legacy.tools.keys()].sort(), ['psd_batch_render', 'psd_inspect'])
+    assert.deepEqual([...legacy.tools.keys()].sort(), ['psd_batch_render', 'psd_edit', 'psd_inspect'])
     const inspected = await call(legacy.tools.get('psd_inspect'), { template: 'tpl.psd' }, sessionAt(workspace))
     assert.equal(inspected.width, 400)
     const price = inspected.layers.find((layer) => layer.name === '价格')
@@ -168,6 +168,20 @@ async function main() {
       )
     }
     await assert.rejects(fs.access(path.join(workspace, 'out-bad')), 'nothing written for an invalid textBySku')
+
+    // psd_edit: every action goes through the host path (no workingDirectory
+    // on 0.2.0), returns a result its schema accepts and renders a summary.
+    const edit = (args) => call(legacy.tools.get('psd_edit'), { template: 'tpl.psd', ...args }, sessionAt(workspace))
+    const texted = await edit({ action: 'text', layer: '价格', value: '¥5.50', sizePx: 30 })
+    assert.equal(texted.value, '¥5.50')
+    const editRender = legacy.tools.get('psd_edit').output.render({ action: 'text' }, texted)[0].text
+    assert.match(editRender, /^psd_edit text: 价格 .*"¥5\.50"/)
+    await edit({ action: 'element', paths: ['sku.png'], name: 'badge', dx: 10, dy: 10, scale: 0.2 })
+    await edit({ action: 'status' })
+    await edit({ action: 'save_project', project: 'p.json' })
+    await edit({ action: 'remelement', names: ['badge'] })
+    await edit({ action: 'load_project', project: 'p.json' })
+    await edit({ action: 'reset' })
     legacy.dispose()
 
     // --- dsh >= 0.2.1: the workingDirectory service is preferred ------------
